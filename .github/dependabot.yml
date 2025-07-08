@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/" # Path where your go.mod is located
+    schedule:
+      interval: "weekly" # Options: 'daily', 'weekly', 'monthly'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "go"
+      - "dependencies"
+      - "automated"
+    ignore:
+      - dependency-name: "github.com/some/dependency"
+        versions: ["1.2.x"] # You can ignore certain versions
