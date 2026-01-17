@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	resourceapi "k8s.io/api/resource/v1beta1"
+	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -33,6 +33,11 @@ import (
 	"k8s.io/kubernetes/test/utils/ktesting"
 	"k8s.io/kubernetes/test/utils/ktesting/initoption"
 )
+
+// Some of these tests capture log output. Don't reduce the verbosity or they will fail!
+func init() {
+	ktesting.SetDefaultVerbosity(5)
+}
 
 // ClaimInfo test cases
 
@@ -92,8 +97,10 @@ func TestNewClaimInfoFromClaim(t *testing.T) {
 					Devices: resourceapi.DeviceClaim{
 						Requests: []resourceapi.DeviceRequest{
 							{
-								Name:            requestName,
-								DeviceClassName: className,
+								Name: requestName,
+								Exactly: &resourceapi.ExactDeviceRequest{
+									DeviceClassName: className,
+								},
 							},
 						},
 					},

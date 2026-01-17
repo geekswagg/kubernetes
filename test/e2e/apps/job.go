@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/resourceversion"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
@@ -42,6 +43,8 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	batchinternal "k8s.io/kubernetes/pkg/apis/batch"
+	"k8s.io/kubernetes/pkg/features"
+	apimachineryutils "k8s.io/kubernetes/test/e2e/common/apimachinery"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ejob "k8s.io/kubernetes/test/e2e/framework/job"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -249,7 +252,8 @@ var _ = SIGDescribe("Job", func() {
 					Namespace: pod.Namespace,
 				},
 			}
-			err = f.ClientSet.CoreV1().Pods(pod.Namespace).EvictV1(ctx, evictTarget)
+			// use new variable explicitly here, to ensure it doesn't escape the scope of goroutines
+			err := f.ClientSet.CoreV1().Pods(pod.Namespace).EvictV1(ctx, evictTarget)
 			framework.ExpectNoError(err, "failed to evict the pod: %s/%s", pod.Name, pod.Namespace)
 
 			ginkgo.By(fmt.Sprintf("Awaiting for the pod: %s/%s to be deleted", pod.Name, pod.Namespace))
@@ -1181,11 +1185,13 @@ done`}
 		job.Spec.Suspend = ptr.To(true)
 		job, err = e2ejob.CreateJob(ctx, f.ClientSet, ns, job)
 		framework.ExpectNoError(err, "failed to create job in namespace: %s", ns)
+		gomega.Expect(job).To(apimachineryutils.HaveValidResourceVersion())
 
 		ginkgo.By("Patching the Job")
 		payload := "{\"metadata\":{\"labels\":{\"" + jobName + "\":\"patched\"}}}"
 		patchedJob, err := f.ClientSet.BatchV1().Jobs(ns).Patch(ctx, jobName, types.StrategicMergePatchType, []byte(payload), metav1.PatchOptions{})
 		framework.ExpectNoError(err, "failed to patch Job %s in namespace %s", jobName, ns)
+		gomega.Expect(resourceversion.CompareResourceVersion(job.ResourceVersion, patchedJob.ResourceVersion)).To(gomega.BeNumerically("==", -1), "patched object should have a larger resource version")
 
 		ginkgo.By("Watching for Job to be patched")
 		c := watchEventConfig{
@@ -1325,6 +1331,51 @@ done`}
 		gomega.Consistently(ctx, get).
 			WithPolling(time.Second).WithTimeout(3 * time.Second).
 			Should(gomega.HaveField("Status", gomega.BeEquivalentTo(batchv1.JobStatus{})))
+	})
+
+	framework.It("containers restarted by container restart policy should not trigger PodFailurePolicy", framework.WithFeature("ContainerRestartRules"), framework.WithFeatureGate(features.ContainerRestartRules), func(ctx context.Context) {
+		parallelism := int32(1)
+		completions := int32(1)
+		backoffLimit := int32(1)
+		containerRestartPolicyOnFailure := v1.ContainerRestartPolicyOnFailure
+
+		ginkgo.By("Looking for a node to schedule job pod")
+		node, err := e2enode.GetRandomReadySchedulableNode(ctx, f.ClientSet)
+		framework.ExpectNoError(err)
+
+		ginkgo.By("Creating a job with container-level RestartPolicy and PodFailurePolicy")
+		job := e2ejob.NewTestJobOnNode("failOnce", "managed-by", v1.RestartPolicyNever, parallelism, completions, nil, backoffLimit, node.Name)
+		container := job.Spec.Template.Spec.Containers[0]
+		container.RestartPolicy = &containerRestartPolicyOnFailure
+		job.Spec.Template.Spec.Containers[0] = container
+		job.Spec.PodFailurePolicy = &batchv1.PodFailurePolicy{
+			Rules: []batchv1.PodFailurePolicyRule{{
+				Action: batchv1.PodFailurePolicyActionFailJob,
+				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+					ContainerName: &container.Name,
+					Operator:      batchv1.PodFailurePolicyOnExitCodesOpIn,
+					Values:        []int32{1},
+				},
+			}},
+		}
+		job, err = e2ejob.CreateJob(ctx, f.ClientSet, f.Namespace.Name, job)
+		framework.ExpectNoError(err, "failed to create job in namespace: %s/%s", job.Namespace, job.Name)
+
+		ginkgo.By("Waiting for job to complete")
+		err = e2ejob.WaitForJobComplete(ctx, f.ClientSet, f.Namespace.Name, job.Name, batchv1.JobReasonCompletionsReached, completions)
+		framework.ExpectNoError(err, "failed to ensure job completion in namespace: %s", f.Namespace.Name)
+
+		ginkgo.By("Ensuring job succeeded")
+		job, err = e2ejob.GetJob(ctx, f.ClientSet, f.Namespace.Name, job.Name)
+		framework.ExpectNoError(err, "failed to get job")
+		for _, cond := range job.Status.Conditions {
+			if cond.Type == batchv1.JobComplete {
+				gomega.Expect(cond.Status).Should(gomega.Equal(v1.ConditionTrue))
+			}
+		}
+		gomega.Expect(job.Status.Active).Should(gomega.Equal(int32(0)))
+		gomega.Expect(job.Status.Ready).Should(gomega.Equal(ptr.To[int32](0)))
+		gomega.Expect(job.Status.Terminating).Should(gomega.Equal(ptr.To[int32](0)))
 	})
 })
 

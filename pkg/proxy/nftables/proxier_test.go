@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -36,11 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/version"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-base/metrics/testutil"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
 	"k8s.io/kubernetes/pkg/proxy/conntrack"
@@ -160,11 +155,11 @@ var baseRules = dedent.Dedent(`
 	add map ip kube-proxy service-nodeports { type inet_proto . inet_service : verdict ; comment "NodePort traffic" ; }
 
 	add chain ip kube-proxy cluster-ips-check
-	add chain ip kube-proxy filter-prerouting { type filter hook prerouting priority -110 ; }
-	add chain ip kube-proxy filter-forward { type filter hook forward priority -110 ; }
-	add chain ip kube-proxy filter-input { type filter hook input priority -110 ; }
-	add chain ip kube-proxy filter-output { type filter hook output priority -110 ; }
-	add chain ip kube-proxy filter-output-post-dnat { type filter hook output priority -90 ; }
+	add chain ip kube-proxy filter-prerouting-pre-dnat { type filter hook prerouting priority -110 ; }
+	add chain ip kube-proxy filter-output-pre-dnat { type filter hook output priority -110 ; }
+	add chain ip kube-proxy filter-forward { type filter hook forward priority 0 ; }
+	add chain ip kube-proxy filter-input { type filter hook input priority 0 ; }
+	add chain ip kube-proxy filter-output { type filter hook output priority 0 ; }
 	add chain ip kube-proxy firewall-check
 	add chain ip kube-proxy mark-for-masquerade
 	add chain ip kube-proxy masquerading
@@ -178,14 +173,14 @@ var baseRules = dedent.Dedent(`
 
 	add rule ip kube-proxy cluster-ips-check ip daddr @cluster-ips reject comment "Reject traffic to invalid ports of ClusterIPs"
 	add rule ip kube-proxy cluster-ips-check ip daddr { 172.30.0.0/16 } drop comment "Drop traffic to unallocated ClusterIPs"
-	add rule ip kube-proxy filter-prerouting ct state new jump firewall-check
+	add rule ip kube-proxy filter-prerouting-pre-dnat ct state new jump firewall-check
 	add rule ip kube-proxy filter-forward ct state new jump service-endpoints-check
 	add rule ip kube-proxy filter-forward ct state new jump cluster-ips-check
 	add rule ip kube-proxy filter-input ct state new jump nodeport-endpoints-check
 	add rule ip kube-proxy filter-input ct state new jump service-endpoints-check
 	add rule ip kube-proxy filter-output ct state new jump service-endpoints-check
-	add rule ip kube-proxy filter-output ct state new jump firewall-check
-	add rule ip kube-proxy filter-output-post-dnat ct state new jump cluster-ips-check
+	add rule ip kube-proxy filter-output-pre-dnat ct state new jump firewall-check
+	add rule ip kube-proxy filter-output ct state new jump cluster-ips-check
 	add rule ip kube-proxy firewall-check ip daddr . meta l4proto . th dport vmap @firewall-ips
 	add rule ip kube-proxy mark-for-masquerade mark set mark or 0x4000
 	add rule ip kube-proxy masquerading mark and 0x4000 == 0 return
@@ -4616,62 +4611,32 @@ func TestNoEndpointsMetric(t *testing.T) {
 
 func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 	testCases := []struct {
-		name          string
-		ipModeEnabled bool
-		svcIP         string
-		svcLBIP       string
-		ipMode        *v1.LoadBalancerIPMode
-		expectedRule  bool
+		name         string
+		svcIP        string
+		svcLBIP      string
+		ipMode       *v1.LoadBalancerIPMode
+		expectedRule bool
 	}{
-		/* LoadBalancerIPMode disabled */
 		{
-			name:          "LoadBalancerIPMode disabled, ipMode Proxy",
-			ipModeEnabled: false,
-			svcIP:         "10.20.30.41",
-			svcLBIP:       "1.2.3.4",
-			ipMode:        ptr.To(v1.LoadBalancerIPModeProxy),
-			expectedRule:  true,
+			name:         "ipMode Proxy",
+			svcIP:        "10.20.30.41",
+			svcLBIP:      "1.2.3.4",
+			ipMode:       ptr.To(v1.LoadBalancerIPModeProxy),
+			expectedRule: false,
 		},
 		{
-			name:          "LoadBalancerIPMode disabled, ipMode VIP",
-			ipModeEnabled: false,
-			svcIP:         "10.20.30.42",
-			svcLBIP:       "1.2.3.5",
-			ipMode:        ptr.To(v1.LoadBalancerIPModeVIP),
-			expectedRule:  true,
+			name:         "ipMode VIP",
+			svcIP:        "10.20.30.42",
+			svcLBIP:      "1.2.3.5",
+			ipMode:       ptr.To(v1.LoadBalancerIPModeVIP),
+			expectedRule: true,
 		},
 		{
-			name:          "LoadBalancerIPMode disabled, ipMode nil",
-			ipModeEnabled: false,
-			svcIP:         "10.20.30.43",
-			svcLBIP:       "1.2.3.6",
-			ipMode:        nil,
-			expectedRule:  true,
-		},
-		/* LoadBalancerIPMode enabled */
-		{
-			name:          "LoadBalancerIPMode enabled, ipMode Proxy",
-			ipModeEnabled: true,
-			svcIP:         "10.20.30.41",
-			svcLBIP:       "1.2.3.4",
-			ipMode:        ptr.To(v1.LoadBalancerIPModeProxy),
-			expectedRule:  false,
-		},
-		{
-			name:          "LoadBalancerIPMode enabled, ipMode VIP",
-			ipModeEnabled: true,
-			svcIP:         "10.20.30.42",
-			svcLBIP:       "1.2.3.5",
-			ipMode:        ptr.To(v1.LoadBalancerIPModeVIP),
-			expectedRule:  true,
-		},
-		{
-			name:          "LoadBalancerIPMode enabled, ipMode nil",
-			ipModeEnabled: true,
-			svcIP:         "10.20.30.43",
-			svcLBIP:       "1.2.3.6",
-			ipMode:        nil,
-			expectedRule:  true,
+			name:         "ipMode nil",
+			svcIP:        "10.20.30.43",
+			svcLBIP:      "1.2.3.6",
+			ipMode:       nil,
+			expectedRule: true,
 		},
 	}
 
@@ -4685,10 +4650,6 @@ func TestLoadBalancerIngressRouteTypeProxy(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if !testCase.ipModeEnabled {
-				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
-			}
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.LoadBalancerIPMode, testCase.ipModeEnabled)
 			nft, fp := NewFakeProxier(v1.IPv4Protocol)
 			makeServiceMap(fp,
 				makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {

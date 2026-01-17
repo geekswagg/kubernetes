@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 /*
 Copyright 2018 The Kubernetes Authors.
@@ -39,6 +38,8 @@ const (
 	epIpv6Address     = "192::3"
 	epIpAddressB      = "192.168.1.4"
 	epIpAddressRemote = "192.168.2.3"
+	epIpAddressLocal1 = "192.168.4.4"
+	epIpAddressLocal2 = "192.168.4.5"
 	epPaAddress       = "10.0.0.3"
 	protocol          = 6
 	internalPort      = 80

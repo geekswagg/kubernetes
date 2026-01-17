@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 /*
 Copyright 2017 The Kubernetes Authors.
@@ -44,7 +43,6 @@ import (
 	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/apis/config"
-	proxyconfig "k8s.io/kubernetes/pkg/proxy/config"
 	"k8s.io/kubernetes/pkg/proxy/healthcheck"
 	"k8s.io/kubernetes/pkg/proxy/metaproxier"
 	"k8s.io/kubernetes/pkg/proxy/metrics"
@@ -53,36 +51,8 @@ import (
 	netutils "k8s.io/utils/net"
 )
 
-// KernelCompatTester tests whether the required kernel capabilities are
-// present to run the windows kernel proxier.
-type KernelCompatTester interface {
-	IsCompatible() error
-}
-
 type HostMacProvider interface {
 	GetHostMac(nodeIP net.IP) string
-}
-
-// CanUseWinKernelProxier returns true if we should use the Kernel Proxier
-// instead of the "classic" userspace Proxier.  This is determined by checking
-// the windows kernel version and for the existence of kernel features.
-func CanUseWinKernelProxier(kcompat KernelCompatTester) (bool, error) {
-	// Check that the kernel supports what we need.
-	if err := kcompat.IsCompatible(); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-type WindowsKernelCompatTester struct{}
-
-// IsCompatible returns true if winkernel can support this mode of proxy
-func (lkct WindowsKernelCompatTester) IsCompatible() error {
-	_, err := hnslib.HNSListPolicyListRequest()
-	if err != nil {
-		return fmt.Errorf("Windows kernel is not compatible for Kernel mode")
-	}
-	return nil
 }
 
 type externalIPInfo struct {
@@ -267,50 +237,6 @@ func isOverlay(hnsNetworkInfo *hnsNetworkInfo) bool {
 	return strings.EqualFold(hnsNetworkInfo.networkType, NETWORK_TYPE_OVERLAY)
 }
 
-// StackCompatTester tests whether the required kernel and network are dualstack capable
-type StackCompatTester interface {
-	DualStackCompatible(networkName string) bool
-}
-
-type DualStackCompatTester struct{}
-
-func (t DualStackCompatTester) DualStackCompatible(networkName string) bool {
-	hcnImpl := newHcnImpl()
-	// First tag of hnslib that has a proper check for dual stack support is v0.8.22 due to a bug.
-	if err := hcnImpl.Ipv6DualStackSupported(); err != nil {
-		// Hcn *can* fail the query to grab the version of hcn itself (which this call will do internally before parsing
-		// to see if dual stack is supported), but the only time this can happen, at least that can be discerned, is if the host
-		// is pre-1803 and hcn didn't exist. hnslib should truthfully return a known error if this happened that we can
-		// check against, and the case where 'err != this known error' would be the 'this feature isn't supported' case, as is being
-		// used here. For now, seeming as how nothing before ws2019 (1809) is listed as supported for k8s we can pretty much assume
-		// any error here isn't because the query failed, it's just that dualstack simply isn't supported on the host. With all
-		// that in mind, just log as info and not error to let the user know we're falling back.
-		klog.InfoS("This version of Windows does not support dual-stack, falling back to single-stack", "err", err.Error())
-		return false
-	}
-
-	// check if network is using overlay
-	hns, _ := newHostNetworkService(hcnImpl)
-	networkName, err := getNetworkName(networkName)
-	if err != nil {
-		klog.ErrorS(err, "Unable to determine dual-stack status, falling back to single-stack")
-		return false
-	}
-	networkInfo, err := getNetworkInfo(hns, networkName)
-	if err != nil {
-		klog.ErrorS(err, "Unable to determine dual-stack status, falling back to single-stack")
-		return false
-	}
-
-	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.WinOverlay) && isOverlay(networkInfo) {
-		// Overlay (VXLAN) networks on Windows do not support dual-stack networking today
-		klog.InfoS("Winoverlay does not support dual-stack, falling back to single-stack")
-		return false
-	}
-
-	return true
-}
-
 // internal struct for endpoints information
 type endpointInfo struct {
 	ip              string
@@ -406,7 +332,7 @@ func (proxier *Proxier) updateTerminatedEndpoints(eps []proxy.Endpoint, isOldEnd
 func (proxier *Proxier) endpointsMapChange(oldEndpointsMap, newEndpointsMap proxy.EndpointsMap) {
 	// This will optimize remote endpoint and loadbalancer deletion based on the annotation
 	var svcPortMap = make(map[proxy.ServicePortName]bool)
-	clear(proxier.terminatedEndpoints)
+
 	var logLevel klog.Level = 5
 	for svcPortName, eps := range oldEndpointsMap {
 		logFormattedEndpoints("endpointsMapChange oldEndpointsMap", logLevel, svcPortName, eps)
@@ -641,8 +567,6 @@ type endPointsReferenceCountMap map[string]*uint16
 type Proxier struct {
 	// ipFamily defines the IP family which this proxier is tracking.
 	ipFamily v1.IPFamily
-	// TODO(imroc): implement node handler for winkernel proxier.
-	proxyconfig.NoopNodeHandler
 
 	// endpointsChanges and serviceChanges contains all changes to endpoints and
 	// services that happened since policies were synced. For a single object,
@@ -753,8 +677,8 @@ func NewProxier(
 		return nil, err
 	}
 
-	klog.V(3).Info("Record sync params", "minSyncPeriod", minSyncPeriod, "syncPeriod", syncPeriod, "maxSyncPeriod", proxyutil.FullSyncPeriod)
-	proxier.syncRunner = runner.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, proxyutil.FullSyncPeriod)
+	klog.V(3).Info("Record sync params", "minSyncPeriod", minSyncPeriod, "syncPeriod", syncPeriod, "maxSyncPeriod", syncPeriod)
+	proxier.syncRunner = runner.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, syncPeriod)
 
 	return proxier, nil
 }
@@ -1098,6 +1022,13 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 // in any of the ServiceCIDRs, and provides complete list of service cidrs.
 func (proxier *Proxier) OnServiceCIDRsChanged(_ []string) {}
 
+// TODO(imroc): implement OnTopologyChanged for winkernel proxier.
+// OnTopologyChange is called whenever node topology labels are changed.
+// The informer is tweaked to listen for updates of the node where this
+// instance of kube-proxy is running, this guarantees the changed labels
+// are for this node.
+func (proxier *Proxier) OnTopologyChange(topologyLabels map[string]string) {}
+
 func (proxier *Proxier) cleanupAllPolicies() {
 	for svcName, svc := range proxier.svcPortMap {
 		svcInfo, ok := svc.(*serviceInfo)
@@ -1229,6 +1160,9 @@ func (proxier *Proxier) syncProxyRules() (retryError error) {
 		return
 	}
 
+	// Clear terminated endpoints map
+	clear(proxier.terminatedEndpoints)
+
 	// We assume that if this was called, we really want to sync them,
 	// even if nothing changed in the meantime. In other words, callers are
 	// responsible for detecting no-op changes and not calling this function.
@@ -1356,7 +1290,9 @@ func (proxier *Proxier) syncProxyRules() (retryError error) {
 			// targetPort is zero if it is specified as a name in port.TargetPort, so the real port should be got from endpoints.
 			// Note that hnslib.AddLoadBalancer() doesn't support endpoints with different ports, so only port from first endpoint is used.
 			// TODO(feiskyer): add support of different endpoint ports after hnslib.AddLoadBalancer() add that.
-			if svcInfo.targetPort == 0 {
+			if svcInfo.targetPort == 0 || svcInfo.targetPort != int(ep.port) {
+				// Update the targetPort to the first endpoint's port if it is not specified or different from the endpoint's port.
+				klog.V(3).InfoS("Update targetPort", "oldTargetPort", svcInfo.targetPort, "newTargetPort", ep.port)
 				svcInfo.targetPort = int(ep.port)
 			}
 			// There is a bug in Windows Server 2019 that can cause two endpoints to be created with the same IP address, so we need to check using endpoint ID first.
@@ -1520,7 +1456,7 @@ func (proxier *Proxier) syncProxyRules() (retryError error) {
 		}
 
 		if !proxier.requiresUpdateLoadbalancer(svcInfo.hnsID, len(clusterIPEndpoints)) {
-			proxier.deleteExistingLoadBalancer(hns, svcInfo.winProxyOptimization, &svcInfo.hnsID, svcInfo.ClusterIP().String(), Enum(svcInfo.Protocol()), uint16(svcInfo.targetPort), uint16(svcInfo.Port()), hnsEndpoints, queriedLoadBalancers)
+			proxier.deleteExistingLoadBalancer(hns, svcInfo.winProxyOptimization, &svcInfo.hnsID, svcInfo.ClusterIP().String(), Enum(svcInfo.Protocol()), uint16(svcInfo.targetPort), uint16(svcInfo.Port()), clusterIPEndpoints, queriedLoadBalancers)
 			if len(clusterIPEndpoints) > 0 {
 
 				// If all endpoints are terminating, then no need to create Cluster IP LoadBalancer
@@ -1778,10 +1714,11 @@ func (proxier *Proxier) syncProxyRules() (retryError error) {
 		klog.V(5).InfoS("Terminated endpoints ready for deletion", "epIP", epIP)
 		if epToDelete := queriedEndpoints[epIP]; epToDelete != nil && epToDelete.hnsID != "" && !epToDelete.IsLocal() {
 			if refCount := proxier.endPointsRefCount.getRefCount(epToDelete.hnsID); refCount == nil || *refCount == 0 {
-				klog.V(3).InfoS("Deleting unreferenced remote endpoint", "hnsID", epToDelete.hnsID, "IP", epToDelete.ip)
 				err := proxier.hns.deleteEndpoint(epToDelete.hnsID)
 				if err != nil {
 					klog.ErrorS(err, "Deleting unreferenced remote endpoint failed", "hnsID", epToDelete.hnsID)
+				} else {
+					klog.V(3).InfoS("Deleting unreferenced remote endpoint succeeded", "hnsID", epToDelete.hnsID, "IP", epToDelete.ip)
 				}
 			}
 		}

@@ -99,7 +99,7 @@ func TestVolumeBinding(t *testing.T) {
 		capacities              []*storagev1.CSIStorageCapacity
 		fts                     feature.Features
 		args                    *config.VolumeBindingArgs
-		wantPreFilterResult     *framework.PreFilterResult
+		wantPreFilterResult     *fwk.PreFilterResult
 		wantPreFilterStatus     *fwk.Status
 		wantStateAfterPreFilter *stateData
 		wantFilterStatus        []*fwk.Status
@@ -1127,6 +1127,65 @@ func TestVolumeBinding(t *testing.T) {
 					t.Errorf("Score expects score %d for node %q, got: %d", item.wantScores[i], nodeName, score)
 				}
 			}
+		})
+	}
+}
+
+func Test_PreBindPreFlight(t *testing.T) {
+	table := []struct {
+		name       string
+		nodeName   string
+		state      *stateData
+		wantStatus *fwk.Status
+	}{
+		{
+			name:     "all bound",
+			nodeName: "node-a",
+			state: &stateData{
+				allBound: true,
+			},
+			wantStatus: fwk.NewStatus(fwk.Skip),
+		},
+		{
+			name:     "volume to be bound",
+			nodeName: "node-a",
+			state: &stateData{
+				podVolumesByNode: map[string]*PodVolumes{
+					"node-a": {},
+				},
+			},
+			wantStatus: nil,
+		},
+		{
+			name:       "error: state is nil",
+			nodeName:   "node-a",
+			wantStatus: fwk.AsStatus(fwk.ErrNotFound),
+		},
+		{
+			name:     "error: node is not found in podVolumesByNode",
+			nodeName: "node-a",
+			state: &stateData{
+				podVolumesByNode: map[string]*PodVolumes{
+					"node-b": {},
+				},
+			},
+			wantStatus: fwk.AsStatus(errNoPodVolumeForNode),
+		},
+	}
+
+	for _, item := range table {
+		t.Run(item.name, func(t *testing.T) {
+			pl := &VolumeBinding{}
+			_, ctx := ktesting.NewTestContext(t)
+			state := framework.NewCycleState()
+			if item.state != nil {
+				state.Write(stateKey, item.state)
+			}
+			result, status := pl.PreBindPreFlight(ctx, state, &v1.Pod{}, item.nodeName)
+			if !status.Equal(item.wantStatus) {
+				t.Errorf("PreBindPreFlight failed - got: %v, want: %v", status, item.wantStatus)
+			}
+			assert.Equal(t, &fwk.PreBindPreFlightResult{AllowParallel: true}, result)
 		})
 	}
 }

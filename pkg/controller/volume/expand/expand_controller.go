@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -323,19 +323,26 @@ func (expc *expandController) expand(logger klog.Logger, pvc *v1.PersistentVolum
 // TODO make concurrency configurable (workers argument). previously, nestedpendingoperations spawned unlimited goroutines
 func (expc *expandController) Run(ctx context.Context) {
 	defer runtime.HandleCrash()
-	defer expc.queue.ShutDown()
+
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting expand controller")
-	defer logger.Info("Shutting down expand controller")
 
-	if !cache.WaitForNamedCacheSync("expand", ctx.Done(), expc.pvcsSynced) {
+	var wg sync.WaitGroup
+	defer func() {
+		logger.Info("Shutting down expand controller")
+		expc.queue.ShutDown()
+		wg.Wait()
+	}()
+
+	if !cache.WaitForNamedCacheSyncWithContext(ctx, expc.pvcsSynced) {
 		return
 	}
 
 	for i := 0; i < defaultWorkerCount; i++ {
-		go wait.UntilWithContext(ctx, expc.runWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, expc.runWorker, time.Second)
+		})
 	}
-
 	<-ctx.Done()
 }
 
@@ -412,10 +419,6 @@ func (expc *expandController) GetMounter() mount.Interface {
 
 func (expc *expandController) GetHostName() string {
 	return ""
-}
-
-func (expc *expandController) GetHostIP() (net.IP, error) {
-	return nil, fmt.Errorf("GetHostIP not supported by expand controller's VolumeHost implementation")
 }
 
 func (expc *expandController) GetNodeAllocatable() (v1.ResourceList, error) {

@@ -76,9 +76,7 @@ func (kl *Kubelet) ListBlockVolumesForPod(podUID types.UID) (map[string]volume.B
 // podVolumesExist checks with the volume manager and returns true any of the
 // pods for the specified volume are mounted or are uncertain.
 func (kl *Kubelet) podVolumesExist(podUID types.UID) bool {
-	if mountedVolumes :=
-		kl.volumeManager.GetPossiblyMountedVolumesForPod(
-			volumetypes.UniquePodName(podUID)); len(mountedVolumes) > 0 {
+	if kl.volumeManager.HasPossiblyMountedVolumesForPod(volumetypes.UniquePodName(podUID)) {
 		return true
 	}
 	// TODO: This checks pod volume paths and whether they are mounted. If checking returns error, podVolumesExist will return true
@@ -147,7 +145,7 @@ func (kl *Kubelet) removeOrphanedPodVolumeDirs(uid types.UID) []error {
 		for _, subpathVolumePath := range subpathVolumePaths {
 			// Remove both files and empty directories here, as the subpath may have been a bind-mount of a file or a directory.
 			if err := os.Remove(subpathVolumePath); err != nil {
-				orphanVolumeErrors = append(orphanVolumeErrors, fmt.Errorf("orphaned pod %q found, but failed to rmdir() subpath at path %v: %v", uid, subpathVolumePath, err))
+				orphanVolumeErrors = append(orphanVolumeErrors, fmt.Errorf("orphaned pod %q found, but failed to remove subpath at path %v: %w", uid, subpathVolumePath, err))
 			} else {
 				klog.InfoS("Cleaned up orphaned volume subpath from pod", "podUID", uid, "path", subpathVolumePath)
 			}
@@ -203,7 +201,7 @@ func (kl *Kubelet) cleanupOrphanedPodDirs(pods []*v1.Pod, runningPods []*kubecon
 			continue
 		}
 
-		// Attempt to remove the pod volumes directory and its subdirs
+		// Attempt to remove the pod volumes directory and its subdirectories
 		podVolumeErrors := kl.removeOrphanedPodVolumeDirs(uid)
 		if len(podVolumeErrors) > 0 {
 			errorPods++
@@ -216,7 +214,7 @@ func (kl *Kubelet) cleanupOrphanedPodDirs(pods []*v1.Pod, runningPods []*kubecon
 			continue
 		}
 
-		// Call RemoveAllOneFilesystem for remaining subdirs under the pod directory
+		// Call RemoveAllOneFilesystem for remaining subdirectories under the pod directory
 		podDir := kl.getPodDir(uid)
 		podSubdirs, err := os.ReadDir(podDir)
 		if err != nil {

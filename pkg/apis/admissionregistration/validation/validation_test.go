@@ -29,8 +29,6 @@ import (
 	plugincel "k8s.io/apiserver/pkg/admission/plugin/cel"
 	"k8s.io/apiserver/pkg/cel/environment"
 	"k8s.io/apiserver/pkg/cel/library"
-	"k8s.io/apiserver/pkg/features"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/apis/admissionregistration"
 	"k8s.io/utils/ptr"
 )
@@ -2904,7 +2902,7 @@ func TestValidateValidatingAdmissionPolicy(t *testing.T) {
 				},
 			},
 		},
-		expectedError: `spec.variables[0].name: Invalid value: "4ever": name is not a valid CEL identifier`,
+		expectedError: `spec.variables[0].name: Invalid value: "4ever": must be a valid CEL identifier`,
 	}, {
 		name: "variable composition cannot compile",
 		config: &admissionregistration.ValidatingAdmissionPolicy{
@@ -3409,9 +3407,8 @@ func TestValidateValidatingAdmissionPolicyUpdate(t *testing.T) {
 		},
 		// TODO: CustomAuditAnnotations: string valueExpression with {oldObject} is allowed
 	}
-	strictCost := utilfeature.DefaultFeatureGate.Enabled(features.StrictCostEnforcementForVAP)
 	// Include the test library, which includes the test() function in the storage environment during test
-	base := environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), strictCost)
+	base := environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion())
 	extended, err := base.Extend(environment.VersionedOptions{
 		IntroducedVersion: version.MustParseGeneric("1.999"),
 		EnvOptions:        []cel.EnvOption{library.Test()},
@@ -3419,19 +3416,11 @@ func TestValidateValidatingAdmissionPolicyUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strictCost {
-		originalCompiler := getStrictStatelessCELCompiler()
-		lazyStrictStatelessCELCompiler = plugincel.NewCompiler(extended)
-		defer func() {
-			lazyStrictStatelessCELCompiler = originalCompiler
-		}()
-	} else {
-		originalCompiler := getNonStrictStatelessCELCompiler()
-		lazyNonStrictStatelessCELCompiler = plugincel.NewCompiler(extended)
-		defer func() {
-			lazyNonStrictStatelessCELCompiler = originalCompiler
-		}()
-	}
+	originalCompiler := getStrictStatelessCELCompiler()
+	lazyStrictStatelessCELCompiler = plugincel.NewCompiler(extended)
+	defer func() {
+		lazyStrictStatelessCELCompiler = originalCompiler
+	}()
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

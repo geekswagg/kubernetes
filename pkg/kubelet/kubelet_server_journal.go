@@ -136,7 +136,7 @@ func newNodeLogQuery(query url.Values) (*nodeLogQuery, field.ErrorList) {
 	// Prevent specifying  an empty or blank space query.
 	// Example: kubectl get --raw /api/v1/nodes/$node/proxy/logs?query="   "
 	if ok && (len(nlq.Files) == 0 && len(nlq.Services) == 0) {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("query"), queries, "query cannot be empty"))
+		allErrs = append(allErrs, field.Invalid(field.NewPath("query"), queries, "may not be empty"))
 	}
 
 	var sinceTime time.Time
@@ -243,7 +243,7 @@ func (n *nodeLogQuery) validate() field.ErrorList {
 	}
 
 	if n.Boot != nil && runtime.GOOS == "windows" {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("boot"), *n.Boot, "boot is not supported on Windows"))
+		allErrs = append(allErrs, field.Invalid(field.NewPath("boot"), *n.Boot, "not supported on Windows"))
 	}
 
 	if n.Boot != nil && *n.Boot > 0 {
@@ -432,7 +432,7 @@ func heuristicsCopyFileLog(ctx context.Context, w io.Writer, logDir, logFileName
 func safeServiceName(s string) error {
 	// Max length of a service name is 256 across supported OSes
 	if len(s) > maxServiceLength {
-		return fmt.Errorf("length must be less than 100")
+		return fmt.Errorf("length must be less than %d", maxServiceLength)
 	}
 
 	if reServiceNameUnsafeCharacters.MatchString(s) {

@@ -121,9 +121,10 @@ func TestValidateCustomResourceDefinition(t *testing.T) {
 		},
 	}
 	tests := []struct {
-		name     string
-		resource *apiextensions.CustomResourceDefinition
-		errors   []validationMatch
+		name        string
+		resource    *apiextensions.CustomResourceDefinition
+		oldResource *apiextensions.CustomResourceDefinition
+		errors      []validationMatch
 	}{
 		{
 			name: "invalid types disallowed",
@@ -4040,7 +4041,7 @@ func TestValidateCustomResourceDefinition(t *testing.T) {
 												},
 												"generation": {
 													Type:    "integer",
-													Minimum: float64Ptr(42.0), // does not make sense, but is allowed for nested ObjectMeta
+													Minimum: ptr.To[float64](42.0), // does not make sense, but is allowed for nested ObjectMeta
 												},
 											},
 										},
@@ -4065,7 +4066,7 @@ func TestValidateCustomResourceDefinition(t *testing.T) {
 												},
 												"generation": {
 													Type:    "integer",
-													Minimum: float64Ptr(42.0), // does not make sense, but is allowed for nested ObjectMeta
+													Minimum: ptr.To[float64](42.0), // does not make sense, but is allowed for nested ObjectMeta
 												},
 											},
 										},
@@ -4094,7 +4095,7 @@ func TestValidateCustomResourceDefinition(t *testing.T) {
 														},
 														"generation": {
 															Type:    "integer",
-															Minimum: float64Ptr(42.0), // does not make sense, but is allowed for nested ObjectMeta
+															Minimum: ptr.To[float64](42.0), // does not make sense, but is allowed for nested ObjectMeta
 														},
 													},
 												},
@@ -5069,6 +5070,14 @@ func TestValidateFieldPath(t *testing.T) {
 }
 
 func TestValidateCustomResourceDefinitionUpdate(t *testing.T) {
+	singleVersionList := []apiextensions.CustomResourceDefinitionVersion{
+		{
+			Name:    "version",
+			Served:  true,
+			Storage: true,
+		},
+	}
+
 	tests := []struct {
 		name     string
 		old      *apiextensions.CustomResourceDefinition
@@ -7773,6 +7782,350 @@ func TestValidateCustomResourceDefinitionUpdate(t *testing.T) {
 				forbidden("spec", "versions[1]", "schema", "openAPIV3Schema", "properties[f]", "x-kubernetes-validations[0]", "messageExpression"),
 			},
 		},
+		{
+			name: "ratcheting: too many selectableFields are not allowed if existing CRD has different selectableFields",
+			old: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:   "group.com",
+					Version: "version",
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{Name: "version", Served: true, Storage: true,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+										"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+										"a7": {Type: "string"}, "a8": {Type: "string"}, "different": {Type: "string"},
+									},
+									Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "different"},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+								{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+								{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".different"},
+							},
+						},
+						{Name: "version2", Served: true, Storage: false,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type:       "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{"foo": {Type: "integer"}},
+								},
+							},
+						},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			resource: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com", ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:   "group.com",
+					Version: "version",
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{Name: "version", Served: true, Storage: true,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+										"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+										"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+									},
+									Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+								{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+								{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+							},
+						},
+						{Name: "version2", Served: true, Storage: false,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type:       "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{"foo": {Type: "integer"}},
+								},
+							},
+						},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			errors: []validationMatch{
+				tooMany("spec", "versions[0]", "selectableFields"),
+			},
+		},
+		{
+			name: "ratcheting: too many selectableFields are allowed if existing CRD has same selectableFields",
+			old: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:   "group.com",
+					Version: "version",
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{Name: "version", Served: true, Storage: true,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+										"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+										"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+									},
+									Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+								{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+								{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+							},
+						},
+						{Name: "version2", Served: true, Storage: false,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type:       "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{"foo": {Type: "integer"}},
+								},
+							},
+						},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			resource: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com", ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:   "group.com",
+					Version: "version",
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{Name: "version", Served: true, Storage: true,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+										"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+										"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+									},
+									Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+								{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+								{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+							},
+						},
+						{Name: "version2", Served: true, Storage: false,
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type:       "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{"foo": {Type: "integer"}},
+								},
+							},
+						},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			errors: []validationMatch{},
+		},
+		{
+			name: "ratcheting: top level schema: too many selectableFields are not allowed if existing CRD has different selectableFields",
+			old: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:    "group.com",
+					Version:  "version",
+					Versions: singleVersionList,
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+								"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+								"a7": {Type: "string"}, "a8": {Type: "string"}, "different": {Type: "string"},
+							},
+							Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "different"},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+						{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+						{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".different"},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			resource: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com", ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:    "group.com",
+					Version:  "version",
+					Versions: singleVersionList,
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+								"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+								"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+							},
+							Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+						{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+						{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			errors: []validationMatch{
+				tooMany("spec", "selectableFields"),
+			},
+		},
+		{
+			name: "ratcheting: top level schema: too many selectableFields are allowed if existing CRD has same selectableFields",
+			old: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:    "group.com",
+					Version:  "version",
+					Versions: singleVersionList,
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+								"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+								"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+							},
+							Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+						{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+						{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			resource: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "plural.group.com", ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:    "group.com",
+					Version:  "version",
+					Versions: singleVersionList,
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"a1": {Type: "string"}, "a2": {Type: "string"}, "a3": {Type: "string"},
+								"a4": {Type: "string"}, "a5": {Type: "string"}, "a6": {Type: "string"},
+								"a7": {Type: "string"}, "a8": {Type: "string"}, "a9": {Type: "string"},
+							},
+							Required: []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{JSONPath: ".a1"}, {JSONPath: ".a2"}, {JSONPath: ".a3"},
+						{JSONPath: ".a4"}, {JSONPath: ".a5"}, {JSONPath: ".a6"},
+						{JSONPath: ".a7"}, {JSONPath: ".a8"}, {JSONPath: ".a9"},
+					},
+					Scope: apiextensions.NamespaceScoped,
+					Names: apiextensions.CustomResourceDefinitionNames{
+						Plural:   "plural",
+						Singular: "singular",
+						Kind:     "Plural",
+						ListKind: "PluralList",
+					},
+					PreserveUnknownFields: ptr.To(false),
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"version"},
+				},
+			},
+			errors: []validationMatch{},
+		},
 	}
 
 	for _, tc := range tests {
@@ -7859,7 +8212,7 @@ func TestValidateCustomResourceDefinitionValidationRuleCompatibility(t *testing.
 	}
 
 	// Include the test library, which includes the test() function in the storage environment during test
-	base := environment.MustBaseEnvSet(version.MajorMinor(1, 998), true)
+	base := environment.MustBaseEnvSet(version.MajorMinor(1, 998))
 	envSet, err := base.Extend(environment.VersionedOptions{
 		IntroducedVersion: version.MajorMinor(1, 999),
 		EnvOptions:        []cel.EnvOption{library.Test()},
@@ -9213,7 +9566,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 			},
 			opts: validationOptions{
 				requireStructuralSchema: true,
-				celEnvironmentSet:       environment.MustBaseEnvSet(version.MajorMinor(1, 30), true),
+				celEnvironmentSet:       environment.MustBaseEnvSet(version.MajorMinor(1, 30)),
 			},
 			expectedErrors: []validationMatch{
 				invalid("spec.validation.openAPIV3Schema.x-kubernetes-validations[2].rule"),
@@ -9397,7 +9750,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 			},
 			opts: validationOptions{
 				requireStructuralSchema: true,
-				celEnvironmentSet:       environment.MustBaseEnvSet(version.MajorMinor(1, 31), true),
+				celEnvironmentSet:       environment.MustBaseEnvSet(version.MajorMinor(1, 31)),
 			},
 			expectedErrors: []validationMatch{
 				invalid("spec.validation.openAPIV3Schema.x-kubernetes-validations[21].rule"),
@@ -9642,7 +9995,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -9668,7 +10021,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -9691,7 +10044,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "array",
-							MaxItems:  int64ptr(10),
+							MaxItems:  ptr.To[int64](10),
 							XListType: ptr.To("atomic"),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
@@ -9714,11 +10067,11 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:     "array",
-							MaxItems: int64ptr(10),
+							MaxItems: ptr.To[int64](10),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 								},
 							},
 							XValidations: apiextensions.ValidationRules{
@@ -9738,12 +10091,12 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "array",
-							MaxItems:  int64ptr(10),
+							MaxItems:  ptr.To[int64](10),
 							XListType: ptr.To("set"),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -9766,12 +10119,12 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "array",
-							MaxItems:  int64ptr(10),
+							MaxItems:  ptr.To[int64](10),
 							XListType: ptr.To("set"),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 								},
 							},
 							XValidations: apiextensions.ValidationRules{
@@ -9801,7 +10154,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 									},
 									Required: []string{"name"},
 									Properties: map[string]apiextensions.JSONSchemaProps{
-										"name": {Type: "string", MaxLength: int64ptr(5)},
+										"name": {Type: "string", MaxLength: ptr.To[int64](5)},
 									},
 								},
 							},
@@ -9819,7 +10172,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:         "array",
-							MaxItems:     int64ptr(10),
+							MaxItems:     ptr.To[int64](10),
 							XListType:    ptr.To("map"),
 							XListMapKeys: []string{"name"},
 							Items: &apiextensions.JSONSchemaPropsOrArray{
@@ -9827,7 +10180,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 									Type:     "object",
 									Required: []string{"name"},
 									Properties: map[string]apiextensions.JSONSchemaProps{
-										"name": {Type: "string", MaxLength: int64ptr(5)},
+										"name": {Type: "string", MaxLength: ptr.To[int64](5)},
 									},
 								},
 							},
@@ -9852,7 +10205,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Properties: map[string]apiextensions.JSONSchemaProps{
 								"subfield": {
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -9876,7 +10229,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Properties: map[string]apiextensions.JSONSchemaProps{
 								"subfield": {
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -9903,7 +10256,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Properties: map[string]apiextensions.JSONSchemaProps{
 								"subfield": {
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self == oldSelf"},
 									},
@@ -10045,7 +10398,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 											Type:     "object",
 											Required: []string{"key"},
 											Properties: map[string]apiextensions.JSONSchemaProps{
-												"key": {Type: "string", MaxLength: int64ptr(10)},
+												"key": {Type: "string", MaxLength: ptr.To[int64](10)},
 											},
 										},
 									},
@@ -10075,17 +10428,17 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:     "array",
-							MaxItems: int64ptr(10),
+							MaxItems: ptr.To[int64](10),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:          "object",
-									MaxProperties: int64ptr(10),
+									MaxProperties: ptr.To[int64](10),
 									AdditionalProperties: &apiextensions.JSONSchemaPropsOrBool{
 										Schema: &apiextensions.JSONSchemaProps{
 											Type:     "object",
 											Required: []string{"key"},
 											Properties: map[string]apiextensions.JSONSchemaProps{
-												"key": {Type: "string", MaxLength: int64ptr(10)},
+												"key": {Type: "string", MaxLength: ptr.To[int64](10)},
 											},
 										},
 									},
@@ -10109,7 +10462,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:     "array",
-							MaxItems: int64ptr(4),
+							MaxItems: ptr.To[int64](4),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type: "object",
@@ -10160,11 +10513,11 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"list": {
 							Type:     "array",
-							MaxItems: int64Ptr(100000),
+							MaxItems: ptr.To[int64](100000),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64Ptr(5000),
+									MaxLength: ptr.To[int64](5000),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self.contains('keyword')"},
 									},
@@ -10173,12 +10526,12 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 						},
 						"map": {
 							Type:          "object",
-							MaxProperties: int64Ptr(1000),
+							MaxProperties: ptr.To[int64](1000),
 							AdditionalProperties: &apiextensions.JSONSchemaPropsOrBool{
 								Allows: true,
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64Ptr(5000),
+									MaxLength: ptr.To[int64](5000),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: "self.contains('keyword')"},
 									},
@@ -10804,7 +11157,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: `self == oldSelf.orValue("")`, OptionalOldSelf: ptr.To(true)},
 									},
@@ -10830,7 +11183,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: `self == oldSelf.orValue("")`, OptionalOldSelf: ptr.To(true)},
 									},
@@ -10853,12 +11206,12 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "array",
-							MaxItems:  int64ptr(10),
+							MaxItems:  ptr.To[int64](10),
 							XListType: ptr.To("set"),
 							Items: &apiextensions.JSONSchemaPropsOrArray{
 								Schema: &apiextensions.JSONSchemaProps{
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: `self == oldSelf.orValue("")`, OptionalOldSelf: ptr.To(true)},
 									},
@@ -10885,7 +11238,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 							Properties: map[string]apiextensions.JSONSchemaProps{
 								"subfield": {
 									Type:      "string",
-									MaxLength: int64ptr(10),
+									MaxLength: ptr.To[int64](10),
 									XValidations: apiextensions.ValidationRules{
 										{Rule: `self == oldSelf.orValue("")`, OptionalOldSelf: ptr.To(true)},
 									},
@@ -10909,7 +11262,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "string",
-							MaxLength: int64ptr(10),
+							MaxLength: ptr.To[int64](10),
 							XValidations: apiextensions.ValidationRules{
 								{Rule: `self == "foo"`, OptionalOldSelf: ptr.To(true)},
 							},
@@ -10930,7 +11283,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 					Properties: map[string]apiextensions.JSONSchemaProps{
 						"value": {
 							Type:      "string",
-							MaxLength: int64ptr(10),
+							MaxLength: ptr.To[int64](10),
 							XValidations: apiextensions.ValidationRules{
 								{Rule: `self == "foo"`, OptionalOldSelf: ptr.To(false)},
 							},
@@ -10947,7 +11300,7 @@ func TestValidateCustomResourceDefinitionValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.TODO()
 			if tt.opts.celEnvironmentSet == nil {
-				tt.opts.celEnvironmentSet = environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), true)
+				tt.opts.celEnvironmentSet = environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion())
 			}
 			got := validateCustomResourceDefinitionValidation(ctx, &tt.input, tt.statusEnabled, tt.opts, field.NewPath("spec", "validation"))
 
@@ -11136,16 +11489,16 @@ var validValidationSchema = &apiextensions.JSONSchemaProps{
 	Type:             "object",
 	Format:           "date-time",
 	Title:            "This is a title",
-	Maximum:          float64Ptr(10),
+	Maximum:          ptr.To[float64](10),
 	ExclusiveMaximum: true,
-	Minimum:          float64Ptr(5),
+	Minimum:          ptr.To[float64](5),
 	ExclusiveMinimum: true,
-	MaxLength:        int64Ptr(10),
-	MinLength:        int64Ptr(5),
+	MaxLength:        ptr.To[int64](10),
+	MinLength:        ptr.To[int64](5),
 	Pattern:          "^[a-z]$",
-	MaxItems:         int64Ptr(10),
-	MinItems:         int64Ptr(5),
-	MultipleOf:       float64Ptr(3),
+	MaxItems:         ptr.To[int64](10),
+	MinItems:         ptr.To[int64](5),
+	MultipleOf:       ptr.To[float64](3),
 	Required:         []string{"spec", "status"},
 	Properties: map[string]apiextensions.JSONSchemaProps{
 		"spec": {
@@ -11172,16 +11525,16 @@ var validUnstructuralValidationSchema = &apiextensions.JSONSchemaProps{
 	Type:             "object",
 	Format:           "date-time",
 	Title:            "This is a title",
-	Maximum:          float64Ptr(10),
+	Maximum:          ptr.To[float64](10),
 	ExclusiveMaximum: true,
-	Minimum:          float64Ptr(5),
+	Minimum:          ptr.To[float64](5),
 	ExclusiveMinimum: true,
-	MaxLength:        int64Ptr(10),
-	MinLength:        int64Ptr(5),
+	MaxLength:        ptr.To[int64](10),
+	MinLength:        ptr.To[int64](5),
 	Pattern:          "^[a-z]$",
-	MaxItems:         int64Ptr(10),
-	MinItems:         int64Ptr(5),
-	MultipleOf:       float64Ptr(3),
+	MaxItems:         ptr.To[int64](10),
+	MinItems:         ptr.To[int64](5),
+	MultipleOf:       ptr.To[float64](3),
 	Required:         []string{"spec", "status"},
 	Items: &apiextensions.JSONSchemaPropsOrArray{
 		Schema: &apiextensions.JSONSchemaProps{
@@ -11196,14 +11549,6 @@ var validUnstructuralValidationSchema = &apiextensions.JSONSchemaProps{
 		Description: "This is an external documentation description",
 	},
 	Example: &example,
-}
-
-func float64Ptr(f float64) *float64 {
-	return &f
-}
-
-func int64Ptr(f int64) *int64 {
-	return &f
 }
 
 func jsonPtr(x interface{}) *apiextensions.JSON {
@@ -11353,7 +11698,7 @@ func TestCostInfo(t *testing.T) {
 		{
 			name: "array",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxItems(genArraySchema(), int64ptr(5)),
+				withMaxItems(genArraySchema(), ptr.To[int64](5)),
 			},
 			expectedMaxCardinality: ptr.To[uint64](5),
 		},
@@ -11364,7 +11709,7 @@ func TestCostInfo(t *testing.T) {
 		},
 		{
 			name:                   "map",
-			schema:                 []*apiextensions.JSONSchemaProps{withMaxProperties(genMapSchema(), int64ptr(10))},
+			schema:                 []*apiextensions.JSONSchemaProps{withMaxProperties(genMapSchema(), ptr.To[int64](10))},
 			expectedMaxCardinality: ptr.To[uint64](10),
 		},
 		{
@@ -11377,15 +11722,15 @@ func TestCostInfo(t *testing.T) {
 		{
 			name: "array inside map",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxProperties(genMapSchema(), int64ptr(5)),
-				withMaxItems(genArraySchema(), int64ptr(5)),
+				withMaxProperties(genMapSchema(), ptr.To[int64](5)),
+				withMaxItems(genArraySchema(), ptr.To[int64](5)),
 			},
 			expectedMaxCardinality: ptr.To[uint64](25),
 		},
 		{
 			name: "unbounded array inside bounded map",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxProperties(genMapSchema(), int64ptr(5)),
+				withMaxProperties(genMapSchema(), ptr.To[int64](5)),
 				genArraySchema(),
 			},
 			expectedMaxCardinality: nil,
@@ -11393,7 +11738,7 @@ func TestCostInfo(t *testing.T) {
 		{
 			name: "object inside array",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxItems(genArraySchema(), int64ptr(3)),
+				withMaxItems(genArraySchema(), ptr.To[int64](3)),
 				genObjectSchema(),
 			},
 			expectedMaxCardinality: ptr.To[uint64](3),
@@ -11401,17 +11746,17 @@ func TestCostInfo(t *testing.T) {
 		{
 			name: "map inside object inside array",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxItems(genArraySchema(), int64ptr(2)),
+				withMaxItems(genArraySchema(), ptr.To[int64](2)),
 				genObjectSchema(),
-				withMaxProperties(genMapSchema(), int64ptr(4)),
+				withMaxProperties(genMapSchema(), ptr.To[int64](4)),
 			},
 			expectedMaxCardinality: ptr.To[uint64](8),
 		},
 		{
 			name: "integer overflow bounds check",
 			schema: []*apiextensions.JSONSchemaProps{
-				withMaxItems(genArraySchema(), int64ptr(math.MaxInt)),
-				withMaxItems(genArraySchema(), int64ptr(100)),
+				withMaxItems(genArraySchema(), ptr.To[int64](math.MaxInt)),
+				withMaxItems(genArraySchema(), ptr.To[int64](100)),
 			},
 			expectedMaxCardinality: ptr.To[uint64](math.MaxUint),
 		},
@@ -11478,7 +11823,7 @@ func TestCelContext(t *testing.T) {
 			celContext := RootCELContext(tt.schema)
 			celContext.converter = converter
 			opts := validationOptions{
-				celEnvironmentSet: environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), true),
+				celEnvironmentSet: environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()),
 			}
 			openAPIV3Schema := &specStandardValidatorV3{
 				allowDefaults:            opts.allowDefaults,
@@ -11571,8 +11916,4 @@ func TestPerCRDEstimatedCost(t *testing.T) {
 			}
 		})
 	}
-}
-
-func int64ptr(i int64) *int64 {
-	return &i
 }

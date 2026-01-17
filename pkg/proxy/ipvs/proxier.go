@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2017 The Kubernetes Authors.
@@ -26,8 +25,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os/exec"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,10 +168,10 @@ type Proxier struct {
 	endpointsChanges *proxy.EndpointsChangeTracker
 	serviceChanges   *proxy.ServiceChangeTracker
 
-	mu           sync.Mutex // protects the following fields
-	svcPortMap   proxy.ServicePortMap
-	endpointsMap proxy.EndpointsMap
-	nodeLabels   map[string]string
+	mu             sync.Mutex // protects the following fields
+	svcPortMap     proxy.ServicePortMap
+	endpointsMap   proxy.EndpointsMap
+	topologyLabels map[string]string
 	// initialSync is a bool indicating if the proxier is syncing for the first time.
 	// It is set to true when a new proxier is initialized and then set to false on all
 	// future syncs.
@@ -402,8 +399,8 @@ func NewProxier(
 		proxier.ipsetList[is.name] = NewIPSet(ipset, is.name, is.setType, (ipFamily == v1.IPv6Protocol), is.comment)
 	}
 
-	logger.V(2).Info("ipvs sync params", "minSyncPeriod", minSyncPeriod, "syncPeriod", syncPeriod, "maxSyncPeriod", proxyutil.FullSyncPeriod)
-	proxier.syncRunner = runner.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, proxyutil.FullSyncPeriod)
+	logger.V(2).Info("ipvs sync params", "minSyncPeriod", minSyncPeriod, "syncPeriod", syncPeriod, "maxSyncPeriod", syncPeriod)
+	proxier.syncRunner = runner.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, syncPeriod)
 
 	proxier.gracefuldeleteManager.Run()
 	return proxier, nil
@@ -564,196 +561,6 @@ func getFirstColumn(r io.Reader) ([]string, error) {
 	return words, nil
 }
 
-// CanUseIPVSProxier checks if we can use the ipvs Proxier.
-// The ipset version and the scheduler are checked. If any virtual servers (VS)
-// already exist with the configured scheduler, we just return. Otherwise
-// we check if a dummy VS can be configured with the configured scheduler.
-// Kernel modules will be loaded automatically if necessary.
-func CanUseIPVSProxier(ctx context.Context, ipvs utilipvs.Interface, ipsetver IPSetVersioner, scheduler string) error {
-	logger := klog.FromContext(ctx)
-	// BUG: https://github.com/moby/ipvs/issues/27
-	// If ipvs is not compiled into the kernel no error is returned and handle==nil.
-	// This in turn causes ipvs.GetVirtualServers and ipvs.AddVirtualServer
-	// to return ok (err==nil). If/when this bug is fixed parameter "ipvs" will be nil
-	// if ipvs is not supported by the kernel. Until then a re-read work-around is used.
-	if ipvs == nil {
-		return fmt.Errorf("Ipvs not supported by the kernel")
-	}
-
-	// Check ipset version
-	versionString, err := ipsetver.GetVersion()
-	if err != nil {
-		return fmt.Errorf("error getting ipset version, error: %v", err)
-	}
-	if !checkMinVersion(versionString) {
-		return fmt.Errorf("ipset version: %s is less than min required version: %s", versionString, MinIPSetCheckVersion)
-	}
-
-	if scheduler == "" {
-		scheduler = defaultScheduler
-	}
-
-	// If any virtual server (VS) using the scheduler exist we skip the checks.
-	vservers, err := ipvs.GetVirtualServers()
-	if err != nil {
-		logger.Error(err, "Can't read the ipvs")
-		return err
-	}
-	logger.V(5).Info("Virtual Servers", "count", len(vservers))
-	if len(vservers) > 0 {
-		// This is most likely a kube-proxy re-start. We know that ipvs works
-		// and if any VS uses the configured scheduler, we are done.
-		for _, vs := range vservers {
-			if vs.Scheduler == scheduler {
-				logger.V(5).Info("VS exist, Skipping checks")
-				return nil
-			}
-		}
-		logger.V(5).Info("No existing VS uses the configured scheduler", "scheduler", scheduler)
-	}
-
-	// Try to insert a dummy VS with the passed scheduler.
-	// We should use a VIP address that is not used on the node.
-	// An address "198.51.100.0" from the TEST-NET-2 rage in https://datatracker.ietf.org/doc/html/rfc5737
-	// is used. These addresses are reserved for documentation. If the user is using
-	// this address for a VS anyway we *will* mess up, but that would be an invalid configuration.
-	// If the user have configured the address to an interface on the node (but not a VS)
-	// then traffic will temporary be routed to ipvs during the probe and dropped.
-	// The later case is also and invalid configuration, but the traffic impact will be minor.
-	// This should not be a problem if users honors reserved addresses, but cut/paste
-	// from documentation is not unheard of, so the restriction to not use the TEST-NET-2 range
-	// must be documented.
-	vs := utilipvs.VirtualServer{
-		Address:   netutils.ParseIPSloppy("198.51.100.0"),
-		Protocol:  "TCP",
-		Port:      20000,
-		Scheduler: scheduler,
-	}
-	if err := ipvs.AddVirtualServer(&vs); err != nil {
-		logger.Error(err, "Could not create dummy VS", "scheduler", scheduler)
-		return err
-	}
-
-	// To overcome the BUG described above we check that the VS is *really* added.
-	vservers, err = ipvs.GetVirtualServers()
-	if err != nil {
-		logger.Error(err, "ipvs.GetVirtualServers")
-		return err
-	}
-	logger.V(5).Info("Virtual Servers after adding dummy", "count", len(vservers))
-	if len(vservers) == 0 {
-		logger.Info("Dummy VS not created", "scheduler", scheduler)
-		return fmt.Errorf("Ipvs not supported") // This is a BUG work-around
-	}
-	logger.V(5).Info("Dummy VS created", "vs", vs)
-
-	if err := ipvs.DeleteVirtualServer(&vs); err != nil {
-		logger.Error(err, "Could not delete dummy VS")
-		return err
-	}
-
-	return nil
-}
-
-// CleanupIptablesLeftovers removes all iptables rules and chains created by the Proxier
-// It returns true if an error was encountered. Errors are logged.
-func cleanupIptablesLeftovers(ctx context.Context, ipt utiliptables.Interface) (encounteredError bool) {
-	logger := klog.FromContext(ctx)
-	// Unlink the iptables chains created by ipvs Proxier
-	for _, jc := range iptablesJumpChain {
-		args := []string{
-			"-m", "comment", "--comment", jc.comment,
-			"-j", string(jc.to),
-		}
-		if err := ipt.DeleteRule(jc.table, jc.from, args...); err != nil {
-			if !utiliptables.IsNotFoundError(err) {
-				logger.Error(err, "Error removing iptables rules in ipvs proxier")
-				encounteredError = true
-			}
-		}
-	}
-
-	// Flush and remove all of our chains. Flushing all chains before removing them also removes all links between chains first.
-	for _, ch := range iptablesCleanupChains {
-		if err := ipt.FlushChain(ch.table, ch.chain); err != nil {
-			if !utiliptables.IsNotFoundError(err) {
-				logger.Error(err, "Error removing iptables rules in ipvs proxier")
-				encounteredError = true
-			}
-		}
-	}
-
-	// Remove all of our chains.
-	for _, ch := range iptablesCleanupChains {
-		if err := ipt.DeleteChain(ch.table, ch.chain); err != nil {
-			if !utiliptables.IsNotFoundError(err) {
-				logger.Error(err, "Error removing iptables rules in ipvs proxier")
-				encounteredError = true
-			}
-		}
-	}
-
-	return encounteredError
-}
-
-// CleanupLeftovers clean up all ipvs and iptables rules created by ipvs Proxier.
-func CleanupLeftovers(ctx context.Context) (encounteredError bool) {
-	// libipvs.New() will log errors if the "ip_vs" kernel module (or the "modprobe"
-	// binary) is not available. Logging an extra error is fine if we were actually
-	// trying to run the ipvs proxier, but it's confusing to see when just doing
-	// best-effort cleanup (eg, when starting the nftables proxier), so we do the same
-	// check libipvs does here, and bail out without calling libipvs if it fails.
-	if _, err := exec.Command("modprobe", "-va", "ip_vs").CombinedOutput(); err != nil {
-		return false
-	}
-
-	ipts, _ := utiliptables.NewDualStack()
-	ipsetInterface := utilipset.New()
-	ipvsInterface := utilipvs.New()
-
-	return cleanupLeftovers(ctx, ipvsInterface, ipts, ipsetInterface)
-}
-
-func cleanupLeftovers(ctx context.Context, ipvs utilipvs.Interface, ipts map[v1.IPFamily]utiliptables.Interface, ipset utilipset.Interface) (encounteredError bool) {
-	logger := klog.FromContext(ctx)
-	// Clear all ipvs rules
-	if ipvs != nil {
-		err := ipvs.Flush()
-		if err != nil {
-			logger.Error(err, "Error flushing ipvs rules")
-			encounteredError = true
-		}
-	}
-	// Delete dummy interface created by ipvs Proxier.
-	nl := NewNetLinkHandle(false)
-	err := nl.DeleteDummyDevice(defaultDummyDevice)
-	if err != nil {
-		logger.Error(err, "Error deleting dummy device created by ipvs proxier", "device", defaultDummyDevice)
-		encounteredError = true
-	}
-
-	// Clear iptables created by ipvs Proxier.
-	for _, ipt := range ipts {
-		encounteredError = cleanupIptablesLeftovers(ctx, ipt) || encounteredError
-	}
-
-	// Destroy ip sets created by ipvs Proxier.  We should call it after cleaning up
-	// iptables since we can NOT delete ip set which is still referenced by iptables.
-	if _, err := ipset.GetVersion(); err == nil {
-		for _, set := range ipsetInfo {
-			err = ipset.DestroySet(set.name)
-			if err != nil {
-				if !utilipset.IsNotFoundError(err) {
-					logger.Error(err, "Error removing ipset", "ipset", set.name)
-					encounteredError = true
-				}
-			}
-		}
-	}
-
-	return encounteredError
-}
-
 // Sync is called to synchronize the proxier state to iptables and ipvs as soon as possible.
 func (proxier *Proxier) Sync() {
 	if proxier.healthzServer != nil {
@@ -850,70 +657,13 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.syncProxyRules()
 }
 
-// OnNodeAdd is called whenever creation of new node object
-// is observed.
-func (proxier *Proxier) OnNodeAdd(node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node", "eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	if reflect.DeepEqual(proxier.nodeLabels, node.Labels) {
-		return
-	}
-
+// OnTopologyChange is called whenever this node's proxy relevant topology-related labels change.
+func (proxier *Proxier) OnTopologyChange(topologyLabels map[string]string) {
 	proxier.mu.Lock()
-	proxier.nodeLabels = map[string]string{}
-	for k, v := range node.Labels {
-		proxier.nodeLabels[k] = v
-	}
+	proxier.topologyLabels = topologyLabels
 	proxier.mu.Unlock()
-	proxier.logger.V(4).Info("Updated proxier node labels", "labels", node.Labels)
-
+	proxier.logger.V(4).Info("Updated proxier node topology labels", "labels", topologyLabels)
 	proxier.Sync()
-}
-
-// OnNodeUpdate is called whenever modification of an existing
-// node object is observed.
-func (proxier *Proxier) OnNodeUpdate(oldNode, node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node", "eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	if reflect.DeepEqual(proxier.nodeLabels, node.Labels) {
-		return
-	}
-
-	proxier.mu.Lock()
-	proxier.nodeLabels = map[string]string{}
-	for k, v := range node.Labels {
-		proxier.nodeLabels[k] = v
-	}
-	proxier.mu.Unlock()
-	proxier.logger.V(4).Info("Updated proxier node labels", "labels", node.Labels)
-
-	proxier.Sync()
-}
-
-// OnNodeDelete is called whenever deletion of an existing node
-// object is observed.
-func (proxier *Proxier) OnNodeDelete(node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node", "eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	proxier.mu.Lock()
-	proxier.nodeLabels = nil
-	proxier.mu.Unlock()
-
-	proxier.Sync()
-}
-
-// OnNodeSynced is called once all the initial event handlers were
-// called and the state is fully propagated to local cache.
-func (proxier *Proxier) OnNodeSynced() {
 }
 
 // OnServiceCIDRsChanged is called whenever a change is observed
@@ -1871,7 +1621,7 @@ func (proxier *Proxier) syncEndpoint(svcPortName proxy.ServicePortName, onlyNode
 	if !ok {
 		proxier.logger.Info("Unable to filter endpoints due to missing service info", "servicePortName", svcPortName)
 	} else {
-		clusterEndpoints, localEndpoints, _, hasAnyEndpoints := proxy.CategorizeEndpoints(endpoints, svcInfo, proxier.nodeName, proxier.nodeLabels)
+		clusterEndpoints, localEndpoints, _, hasAnyEndpoints := proxy.CategorizeEndpoints(endpoints, svcInfo, proxier.nodeName, proxier.topologyLabels)
 		if onlyNodeLocalEndpoints {
 			if len(localEndpoints) > 0 {
 				endpoints = localEndpoints

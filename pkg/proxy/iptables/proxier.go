@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -26,7 +25,6 @@ import (
 	"encoding/base32"
 	"fmt"
 	"net"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,10 +141,10 @@ type Proxier struct {
 	endpointsChanges *proxy.EndpointsChangeTracker
 	serviceChanges   *proxy.ServiceChangeTracker
 
-	mu           sync.Mutex // protects the following fields
-	svcPortMap   proxy.ServicePortMap
-	endpointsMap proxy.EndpointsMap
-	nodeLabels   map[string]string
+	mu             sync.Mutex // protects the following fields
+	svcPortMap     proxy.ServicePortMap
+	endpointsMap   proxy.EndpointsMap
+	topologyLabels map[string]string
 	// endpointSlicesSynced, and servicesSynced are set to true
 	// when corresponding objects are synced after startup. This is used to avoid
 	// updating iptables with some partial data after kube-proxy restart.
@@ -402,102 +400,6 @@ var iptablesKubeletJumpChains = []iptablesJumpChain{
 // on upgrade.
 var iptablesCleanupOnlyChains = []iptablesJumpChain{}
 
-// CleanupLeftovers removes all iptables rules and chains created by the Proxier
-// It returns true if an error was encountered. Errors are logged.
-func CleanupLeftovers(ctx context.Context) (encounteredError bool) {
-	ipts, _ := utiliptables.NewDualStack()
-	for _, ipt := range ipts {
-		encounteredError = cleanupLeftoversForFamily(ctx, ipt) || encounteredError
-	}
-	return
-}
-
-func cleanupLeftoversForFamily(ctx context.Context, ipt utiliptables.Interface) (encounteredError bool) {
-	logger := klog.FromContext(ctx)
-	// Unlink our chains
-	for _, jump := range append(iptablesJumpChains, iptablesCleanupOnlyChains...) {
-		args := append(jump.extraArgs,
-			"-m", "comment", "--comment", jump.comment,
-			"-j", string(jump.dstChain),
-		)
-		if err := ipt.DeleteRule(jump.table, jump.srcChain, args...); err != nil {
-			if !utiliptables.IsNotFoundError(err) {
-				logger.Error(err, "Error removing pure-iptables proxy rule")
-				encounteredError = true
-			}
-		}
-	}
-
-	// Flush and remove all of our "-t nat" chains.
-	iptablesData := bytes.NewBuffer(nil)
-	if err := ipt.SaveInto(utiliptables.TableNAT, iptablesData); err != nil {
-		logger.Error(err, "Failed to execute iptables-save", "table", utiliptables.TableNAT)
-		encounteredError = true
-	} else {
-		existingNATChains := utiliptables.GetChainsFromTable(iptablesData.Bytes())
-		natChains := proxyutil.NewLineBuffer()
-		natRules := proxyutil.NewLineBuffer()
-		natChains.Write("*nat")
-		// Start with chains we know we need to remove.
-		for _, chain := range []utiliptables.Chain{kubeServicesChain, kubeNodePortsChain, kubePostroutingChain, kubeMarkMasqChain, kubeProxyCanaryChain} {
-			if existingNATChains.Has(chain) {
-				chainString := string(chain)
-				natChains.Write(utiliptables.MakeChainLine(chain)) // flush
-				natRules.Write("-X", chainString)                  // delete
-			}
-		}
-		// Hunt for service and endpoint chains.
-		for chain := range existingNATChains {
-			chainString := string(chain)
-			if isServiceChainName(chainString) {
-				natChains.Write(utiliptables.MakeChainLine(chain)) // flush
-				natRules.Write("-X", chainString)                  // delete
-			}
-		}
-		natRules.Write("COMMIT")
-		natLines := append(natChains.Bytes(), natRules.Bytes()...)
-		// Write it.
-		err = ipt.Restore(utiliptables.TableNAT, natLines, utiliptables.NoFlushTables, utiliptables.RestoreCounters)
-		if err != nil {
-			logger.Error(err, "Failed to execute iptables-restore", "table", utiliptables.TableNAT)
-			metrics.IPTablesRestoreFailuresTotal.WithLabelValues(string(ipt.Protocol())).Inc()
-			encounteredError = true
-		}
-	}
-
-	// Flush and remove all of our "-t filter" chains.
-	iptablesData.Reset()
-	if err := ipt.SaveInto(utiliptables.TableFilter, iptablesData); err != nil {
-		logger.Error(err, "Failed to execute iptables-save", "table", utiliptables.TableFilter)
-		encounteredError = true
-	} else {
-		existingFilterChains := utiliptables.GetChainsFromTable(iptablesData.Bytes())
-		filterChains := proxyutil.NewLineBuffer()
-		filterRules := proxyutil.NewLineBuffer()
-		filterChains.Write("*filter")
-		for _, chain := range []utiliptables.Chain{kubeServicesChain, kubeExternalServicesChain, kubeForwardChain, kubeNodePortsChain, kubeProxyFirewallChain, kubeProxyCanaryChain} {
-			if existingFilterChains.Has(chain) {
-				chainString := string(chain)
-				filterChains.Write(utiliptables.MakeChainLine(chain))
-				filterRules.Write("-X", chainString)
-			}
-		}
-		filterRules.Write("COMMIT")
-		filterLines := append(filterChains.Bytes(), filterRules.Bytes()...)
-		// Write it.
-		if err := ipt.Restore(utiliptables.TableFilter, filterLines, utiliptables.NoFlushTables, utiliptables.RestoreCounters); err != nil {
-			logger.Error(err, "Failed to execute iptables-restore", "table", utiliptables.TableFilter)
-			metrics.IPTablesRestoreFailuresTotal.WithLabelValues(string(ipt.Protocol())).Inc()
-			encounteredError = true
-		}
-	}
-
-	// Remove our "-t mangle" canary chain; ignore errors since it may not exist.
-	_ = ipt.DeleteChain(utiliptables.TableMangle, kubeProxyCanaryChain)
-
-	return encounteredError
-}
-
 func computeProbability(n int) string {
 	return fmt.Sprintf("%0.10f", 1.0/float64(n))
 }
@@ -623,76 +525,14 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.syncProxyRules()
 }
 
-// OnNodeAdd is called whenever creation of new node object
-// is observed.
-func (proxier *Proxier) OnNodeAdd(node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node",
-			"eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	if reflect.DeepEqual(proxier.nodeLabels, node.Labels) {
-		return
-	}
-
+// OnTopologyChange is called whenever this node's proxy relevant topology-related labels change.
+func (proxier *Proxier) OnTopologyChange(topologyLabels map[string]string) {
 	proxier.mu.Lock()
-	proxier.nodeLabels = map[string]string{}
-	for k, v := range node.Labels {
-		proxier.nodeLabels[k] = v
-	}
+	proxier.topologyLabels = topologyLabels
 	proxier.needFullSync = true
 	proxier.mu.Unlock()
-	proxier.logger.V(4).Info("Updated proxier node labels", "labels", node.Labels)
-
+	proxier.logger.V(4).Info("Updated proxier node topology labels", "labels", topologyLabels)
 	proxier.Sync()
-}
-
-// OnNodeUpdate is called whenever modification of an existing
-// node object is observed.
-func (proxier *Proxier) OnNodeUpdate(oldNode, node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node",
-			"eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	if reflect.DeepEqual(proxier.nodeLabels, node.Labels) {
-		return
-	}
-
-	proxier.mu.Lock()
-	proxier.nodeLabels = map[string]string{}
-	for k, v := range node.Labels {
-		proxier.nodeLabels[k] = v
-	}
-	proxier.needFullSync = true
-	proxier.mu.Unlock()
-	proxier.logger.V(4).Info("Updated proxier node labels", "labels", node.Labels)
-
-	proxier.Sync()
-}
-
-// OnNodeDelete is called whenever deletion of an existing node
-// object is observed.
-func (proxier *Proxier) OnNodeDelete(node *v1.Node) {
-	if node.Name != proxier.nodeName {
-		proxier.logger.Error(nil, "Received a watch event for a node that doesn't match the current node",
-			"eventNode", node.Name, "currentNode", proxier.nodeName)
-		return
-	}
-
-	proxier.mu.Lock()
-	proxier.nodeLabels = nil
-	proxier.needFullSync = true
-	proxier.mu.Unlock()
-
-	proxier.Sync()
-}
-
-// OnNodeSynced is called once all the initial event handlers were
-// called and the state is fully propagated to local cache.
-func (proxier *Proxier) OnNodeSynced() {
 }
 
 // OnServiceCIDRsChanged is called whenever a change is observed
@@ -998,7 +838,7 @@ func (proxier *Proxier) syncProxyRules() (retryError error) {
 		// from this node, given the service's traffic policies. hasEndpoints is true
 		// if the service has any usable endpoints on any node, not just this one.
 		allEndpoints := proxier.endpointsMap[svcName]
-		clusterEndpoints, localEndpoints, allLocallyReachableEndpoints, hasEndpoints := proxy.CategorizeEndpoints(allEndpoints, svcInfo, proxier.nodeName, proxier.nodeLabels)
+		clusterEndpoints, localEndpoints, allLocallyReachableEndpoints, hasEndpoints := proxy.CategorizeEndpoints(allEndpoints, svcInfo, proxier.nodeName, proxier.topologyLabels)
 
 		// clusterPolicyChain contains the endpoints used with "Cluster" traffic policy
 		clusterPolicyChain := svcInfo.clusterPolicyChainName
