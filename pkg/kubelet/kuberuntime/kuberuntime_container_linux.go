@@ -42,6 +42,7 @@ import (
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	kubeapiqos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	kubefeatures "k8s.io/kubernetes/pkg/features"
+	kubeletconfiginternal "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/qos"
@@ -154,8 +155,17 @@ func (m *kubeGenericRuntimeManager) generateLinuxContainerResources(ctx context.
 		unified := map[string]string{}
 		memoryRequest := container.Resources.Requests.Memory().Value()
 		memoryLimit := container.Resources.Limits.Memory().Value()
-		if memoryRequest != 0 {
-			unified[cm.Cgroup2MemoryMin] = strconv.FormatInt(memoryRequest, 10)
+		if memoryRequest != 0 && m.memoryReservationPolicy == kubeletconfiginternal.TieredReservationMemoryReservationPolicy {
+			// Guaranteed pods get memory.min (hard protection).
+			// Burstable pods get memory.low (soft protection).
+			if kubeapiqos.GetPodQOS(pod) == v1.PodQOSGuaranteed {
+				unified[cm.Cgroup2MemoryMin] = strconv.FormatInt(memoryRequest, 10)
+			} else {
+				unified[cm.Cgroup2MemoryLow] = strconv.FormatInt(memoryRequest, 10)
+			}
+		} else {
+			unified[cm.Cgroup2MemoryMin] = "0"
+			unified[cm.Cgroup2MemoryLow] = "0"
 		}
 
 		// Guaranteed pods by their QoS definition requires that memory request equals memory limit and cpu request must equal cpu limit.
@@ -386,13 +396,13 @@ func toKubeContainerResources(statusResources *runtimeapi.ContainerResources) *k
 	if runtimeStatusResources != nil {
 		var cpuLimit, memLimit, cpuRequest *resource.Quantity
 		if runtimeStatusResources.CpuPeriod > 0 {
-			milliCPU := quotaToMilliCPU(runtimeStatusResources.CpuQuota, runtimeStatusResources.CpuPeriod)
+			milliCPU := cm.QuotaToMilliCPU(runtimeStatusResources.CpuQuota, runtimeStatusResources.CpuPeriod)
 			if milliCPU > 0 {
 				cpuLimit = resource.NewMilliQuantity(milliCPU, resource.DecimalSI)
 			}
 		}
 		if runtimeStatusResources.CpuShares > 0 {
-			milliCPU := sharesToMilliCPU(runtimeStatusResources.CpuShares)
+			milliCPU := cm.SharesToMilliCPU(runtimeStatusResources.CpuShares)
 			if milliCPU > 0 {
 				cpuRequest = resource.NewMilliQuantity(milliCPU, resource.DecimalSI)
 			}
@@ -427,7 +437,7 @@ func checkSwapControllerAvailability(ctx context.Context) bool {
 		// memory.swap.max does not exist in the cgroup root, so we check /sys/fs/cgroup/<SELF>/memory.swap.max
 		cm, err := libcontainercgroups.ParseCgroupFile("/proc/self/cgroup")
 		if err != nil {
-			logger.V(5).Error(fmt.Errorf("failed to parse /proc/self/cgroup: %w", err), warn)
+			logger.V(5).Info(warn, "err", fmt.Errorf("failed to parse /proc/self/cgroup: %w", err))
 			return false
 		}
 		// For cgroup v2 unified hierarchy, there are no per-controller
@@ -438,7 +448,7 @@ func checkSwapControllerAvailability(ctx context.Context) bool {
 	}
 	if _, err := os.Stat(p); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			logger.V(5).Error(err, warn)
+			logger.V(5).Info(warn, "err", err)
 		}
 		return false
 	}

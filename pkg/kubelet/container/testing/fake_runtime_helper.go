@@ -55,7 +55,7 @@ func (f *FakeRuntimeHelper) GetPodCgroupParent(pod *v1.Pod) string {
 	return ""
 }
 
-func (f *FakeRuntimeHelper) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
+func (f *FakeRuntimeHelper) GetPodDNS(_ context.Context, pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 	return &runtimeapi.DNSConfig{
 		Servers:  f.DNSServers,
 		Searches: f.DNSSearches,
@@ -118,7 +118,11 @@ func (f *FakeRuntimeHelper) UnprepareDynamicResources(ctx context.Context, pod *
 	return nil
 }
 
-func (f *FakeRuntimeHelper) SetPodWatchCondition(_ kubetypes.UID, _ string, _ func(*kubecontainer.PodStatus) bool) {
+func (f *FakeRuntimeHelper) RequestPodReinspect(_ kubetypes.UID) {
+	// Not implemented.
+}
+
+func (f *FakeRuntimeHelper) RequestPodRelist(_ kubetypes.UID) {
 	// Not implemented.
 }
 
@@ -127,4 +131,9 @@ func (f *FakeRuntimeHelper) PodCPUAndMemoryStats(_ context.Context, pod *v1.Pod,
 		return stats, nil
 	}
 	return nil, fmt.Errorf("stats for pod %q not found", pod.UID)
+}
+
+func (f *FakeRuntimeHelper) OnPodSandboxReady(_ context.Context, _ *v1.Pod) error {
+	// Not implemented
+	return nil
 }

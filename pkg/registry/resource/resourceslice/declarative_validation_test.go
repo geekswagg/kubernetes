@@ -60,7 +60,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: too many binding conditions": {
 					input: mkResourceSliceWithDevices(tweakBindingConditions(resource.BindingConditionsMaxSize + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingConditions"), resource.BindingConditionsMaxSize+1, resource.BindingConditionsMaxSize).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingConditions"), resource.BindingConditionsMaxSize+1, resource.BindingConditionsMaxSize).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.devices[%d].bindingFailureConditions
@@ -73,7 +73,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: too many binding failure conditions": {
 					input: mkResourceSliceWithDevices(tweakBindingFailureConditions(resource.BindingFailureConditionsMaxSize + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingFailureConditions"), resource.BindingFailureConditionsMaxSize+1, resource.BindingFailureConditionsMaxSize).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingFailureConditions"), resource.BindingFailureConditionsMaxSize+1, resource.BindingFailureConditionsMaxSize).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.Devices[%d].Taints[%d].Effect
@@ -88,13 +88,13 @@ func TestDeclarativeValidate(t *testing.T) {
 					expectedErrs: field.ErrorList{
 						field.NotSupported(
 							field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"),
-							resource.DeviceTaintEffect("Invalid"), []string{}),
+							resource.DeviceTaintEffect("Invalid"), []string{}).MarkAlpha(),
 					},
 				},
 				"invalid: taint empty": {
 					input: mkResourceSliceWithDevices(tweakDeviceTaintEffect("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), ""),
+						field.Required(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), "").MarkAlpha(),
 					},
 				},
 				// spec.Devices[%].attribute
@@ -110,16 +110,36 @@ func TestDeclarativeValidate(t *testing.T) {
 				"valid: device attribute version": {
 					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/version", resource.DeviceAttribute{VersionValue: ptr.To("1.2.3")})),
 				},
+				"valid: device attribute list of ints": {
+					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/list_of_ints", resource.DeviceAttribute{IntValues: []int64{1, 2, 3}})),
+				},
+				"valid: device attribute list of bools": {
+					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/list_of_bools", resource.DeviceAttribute{BoolValues: []bool{true, false, true}})),
+				},
+				"valid: device attribute list of strings": {
+					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/list_of_strings", resource.DeviceAttribute{StringValues: []string{"a", "b", "c"}})),
+				},
+				"valid: device attribute list of versions": {
+					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/list_of_versions", resource.DeviceAttribute{VersionValues: []string{"1.2.3", "2.3.4"}})),
+				},
 				"invalid: device attribute with multiple values": {
 					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/multiple", resource.DeviceAttribute{IntValue: ptr.To[int64](123), BoolValue: ptr.To(true)})),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union").MarkAlpha(),
 					},
 				},
 				"invalid: device attribute no value": {
 					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/multiple", resource.DeviceAttribute{})),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union").MarkAlpha(),
+					},
+				},
+				"invalid: device attribute list with multiple value types": {
+					input: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/list_of_multiple", resource.DeviceAttribute{IntValues: []int64{1, 2}, BoolValues: []bool{true, false}})),
+					expectedErrs: field.ErrorList{
+						field.Invalid(
+							field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/list_of_multiple"), "", "",
+						).WithOrigin("union").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters
@@ -129,7 +149,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: too many shared counters": {
 					input: mkResourceSliceWithSharedCounters(tweakSharedCounters(resource.ResourceSliceMaxCounterSets + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec").Child("sharedCounters"), resource.ResourceSliceMaxCounterSets+1, resource.ResourceSliceMaxCounterSets).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec").Child("sharedCounters"), resource.ResourceSliceMaxCounterSets+1, resource.ResourceSliceMaxCounterSets).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters
@@ -139,7 +159,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: too many device consumes counters": {
 					input: mkResourceSliceWithDevices(tweakDeviceConsumesCounters(resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("consumesCounters"), resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice+1, resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("consumesCounters"), resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice+1, resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters.name
@@ -149,13 +169,13 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: counter set name": {
 					input: mkResourceSliceWithSharedCounters(tweakSharedCountersName("InvalidKey")),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"invalid: counter set name not set": {
 					input: mkResourceSliceWithSharedCounters(tweakSharedCountersName("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), ""),
+						field.Required(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters.counterSet
@@ -165,13 +185,13 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: device consumes counters counter set name": {
 					input: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("InvalidKey")),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"invalid: device consumes counters counter set name not set": {
 					input: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), ""),
+						field.Required(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters
@@ -181,7 +201,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: duplicate names for shared counters": {
 					input: mkResourceSliceWithSharedCounters(tweakSharedCountersName("duplicate-key", "duplicate-key")),
 					expectedErrs: field.ErrorList{
-						field.Duplicate(field.NewPath("spec").Child("sharedCounters").Index(1), "duplicate-key"),
+						field.Duplicate(field.NewPath("spec").Child("sharedCounters").Index(1), "duplicate-key").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters
@@ -191,14 +211,14 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: duplicate names for counter set in device counter consumption": {
 					input: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("duplicate-key", "duplicate-key")),
 					expectedErrs: field.ErrorList{
-						field.Duplicate(field.NewPath("spec").Child("devices").Index(0).Child("consumesCounters").Index(1), "duplicate-key"),
+						field.Duplicate(field.NewPath("spec").Child("devices").Index(0).Child("consumesCounters").Index(1), "duplicate-key").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters.counters
 				"invalid: shared counter key with uppercase": {
 					input: mkResourceSliceWithSharedCounters(tweakSharedCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"valid: shared counter key": {
@@ -208,7 +228,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				"invalid: device counter key with uppercase": {
 					input: mkResourceSliceWithDevices(tweakDeviceCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"valid: device counter key": {
@@ -219,7 +239,11 @@ func TestDeclarativeValidate(t *testing.T) {
 
 			for k, tc := range testCases {
 				t.Run(k, func(t *testing.T) {
-					apitesting.VerifyValidationEquivalence(t, ctx, &tc.input, strategy.Validate, tc.expectedErrs, apitesting.WithNormalizationRules(validation.ResourceNormalizationRules...))
+					apitesting.VerifyValidationEquivalence(
+						t, ctx, &tc.input, strategy.Validate, tc.expectedErrs,
+						apitesting.WithNormalizationRules(validation.ResourceNormalizationRules...),
+						apitesting.WithIgnoreObjectConversionErrors(),
+					)
 				})
 			}
 		})
@@ -255,7 +279,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakBindingConditions(resource.BindingConditionsMaxSize + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingConditions"), resource.BindingConditionsMaxSize+1, resource.BindingConditionsMaxSize).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingConditions"), resource.BindingConditionsMaxSize+1, resource.BindingConditionsMaxSize).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.devices[%d].bindingFailureConditions
@@ -267,7 +291,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakBindingFailureConditions(resource.BindingFailureConditionsMaxSize + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingFailureConditions"), resource.BindingFailureConditionsMaxSize+1, resource.BindingFailureConditionsMaxSize).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("bindingFailureConditions"), resource.BindingFailureConditionsMaxSize+1, resource.BindingFailureConditionsMaxSize).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.devices.taints.effect
@@ -283,14 +307,14 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceTaintEffect("InvalidEffect")),
 					expectedErrs: field.ErrorList{
-						field.NotSupported(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), "InvalidEffect", []string{string(resource.DeviceTaintEffectNoSchedule), string(resource.DeviceTaintEffectNoExecute)}),
+						field.NotSupported(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), "InvalidEffect", []string{string(resource.DeviceTaintEffectNoSchedule), string(resource.DeviceTaintEffectNoExecute)}).MarkAlpha(),
 					},
 				},
 				"invalid update: empty taint effect": {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceTaintEffect("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), ""),
+						field.Required(field.NewPath("spec", "devices").Index(0).Child("taints").Index(0).Child("effect"), "").MarkAlpha(),
 					},
 				},
 				"valid update: device attribute": {
@@ -301,7 +325,14 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/multiple", resource.DeviceAttribute{IntValue: ptr.To[int64](123), BoolValue: ptr.To(true)})),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/multiple"), "", "").WithOrigin("union").MarkAlpha(),
+					},
+				},
+				"invalid update: device attribute no value": {
+					old:    mkResourceSliceWithDevices(),
+					update: mkResourceSliceWithDevices(tweakDeviceAttribute("test.io/empty", resource.DeviceAttribute{})),
+					expectedErrs: field.ErrorList{
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("attributes").Key("test.io/empty"), "", "").WithOrigin("union").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters
@@ -313,7 +344,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithSharedCounters(),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCounters(resource.ResourceSliceMaxCounterSets + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec").Child("sharedCounters"), resource.ResourceSliceMaxCounterSets+1, resource.ResourceSliceMaxCounterSets).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec").Child("sharedCounters"), resource.ResourceSliceMaxCounterSets+1, resource.ResourceSliceMaxCounterSets).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters
@@ -325,7 +356,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceConsumesCounters(resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice + 1)),
 					expectedErrs: field.ErrorList{
-						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("consumesCounters"), resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice+1, resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice).WithOrigin("maxItems"),
+						field.TooMany(field.NewPath("spec", "devices").Index(0).Child("consumesCounters"), resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice+1, resource.ResourceSliceMaxDeviceCounterConsumptionsPerDevice).WithOrigin("maxItems").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters.name
@@ -337,14 +368,14 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithSharedCounters(),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCountersName("InvalidKey")),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"invalid update: counter set name not set": {
 					old:    mkResourceSliceWithSharedCounters(),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCountersName("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), ""),
+						field.Required(field.NewPath("spec", "sharedCounters").Index(0).Child("name"), "").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters.counterSet
@@ -356,14 +387,14 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("InvalidKey")),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				"invalidupdate: device consumes counters counter set name not set": {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("")),
 					expectedErrs: field.ErrorList{
-						field.Required(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), ""),
+						field.Required(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counterSet"), "").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters
@@ -375,7 +406,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithSharedCounters(),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCountersName("duplicate-key", "duplicate-key")),
 					expectedErrs: field.ErrorList{
-						field.Duplicate(field.NewPath("spec").Child("sharedCounters").Index(1), "duplicate-key"),
+						field.Duplicate(field.NewPath("spec").Child("sharedCounters").Index(1), "duplicate-key").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters
@@ -387,7 +418,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceConsumesCountersCounterSetName("duplicate-key", "duplicate-key")),
 					expectedErrs: field.ErrorList{
-						field.Duplicate(field.NewPath("spec").Child("devices").Index(0).Child("consumesCounters").Index(1), "duplicate-key"),
+						field.Duplicate(field.NewPath("spec").Child("devices").Index(0).Child("consumesCounters").Index(1), "duplicate-key").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters.counters
@@ -395,7 +426,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithSharedCounters(),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				// spec.sharedCounters.counters: nil -> invalid
@@ -403,7 +434,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithSharedCounters(tweakSharedCounter(nil)),
 					update: mkResourceSliceWithSharedCounters(tweakSharedCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "sharedCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters.counters
@@ -411,7 +442,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(),
 					update: mkResourceSliceWithDevices(tweakDeviceCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 				// spec.devices.consumesCounters.counters: nil -> invalid
@@ -419,7 +450,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 					old:    mkResourceSliceWithDevices(tweakDeviceCounter(nil)),
 					update: mkResourceSliceWithDevices(tweakDeviceCounter(counters("InvalidKey"))),
 					expectedErrs: field.ErrorList{
-						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name"),
+						field.Invalid(field.NewPath("spec", "devices").Index(0).Child("consumesCounters").Index(0).Child("counters"), "InvalidKey", "").WithOrigin("format=k8s-short-name").MarkAlpha(),
 					},
 				},
 			}

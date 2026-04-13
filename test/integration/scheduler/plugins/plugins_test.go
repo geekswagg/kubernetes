@@ -92,6 +92,10 @@ type PreEnqueuePlugin struct {
 	admit  bool
 }
 
+type PreEnqueueGateAfterPreBindPlugin struct {
+	preBind *PreBindPlugin
+}
+
 type PreFilterPlugin struct {
 	numPreFilterCalled   atomic.Int64
 	failPreFilter        bool
@@ -306,6 +310,7 @@ const (
 	preBindPluginName            = "prebind-plugin"
 	postBindPluginName           = "postbind-plugin"
 	permitPluginName             = "permit-plugin"
+	preEnqueueGatePluginName     = "preenqueue-gate-plugin"
 )
 
 var _ fwk.PreEnqueuePlugin = &PreEnqueuePlugin{}
@@ -326,6 +331,7 @@ var _ fwk.PostBindPlugin = &PostBindPlugin{}
 var _ fwk.PermitPlugin = &PermitPlugin{}
 var _ fwk.EnqueueExtensions = &PermitPlugin{}
 var _ fwk.QueueSortPlugin = &QueueSortPlugin{}
+var _ fwk.PreEnqueuePlugin = &PreEnqueueGateAfterPreBindPlugin{}
 
 func (ep *QueueSortPlugin) Name() string {
 	return queuesortPluginName
@@ -521,6 +527,16 @@ func (pp *PreBindPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEvent
 	return nil, nil
 }
 
+func (pp *PreBindPlugin) hasTriedPreBind(uid types.UID) bool {
+	pp.mutex.Lock()
+	defer pp.mutex.Unlock()
+	if pp.podUIDs == nil {
+		return false
+	}
+	_, ok := pp.podUIDs[uid]
+	return ok
+}
+
 const bindPluginAnnotation = "bindPluginName"
 
 func (bp *BindPlugin) Name() string {
@@ -689,6 +705,19 @@ func (pp *PermitPlugin) rejectAllPods() {
 
 func (pp *PermitPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
 	return nil, nil
+}
+
+// Name returns name of the plugin.
+func (pl *PreEnqueueGateAfterPreBindPlugin) Name() string {
+	return preEnqueueGatePluginName
+}
+
+// PreEnqueue is a test function that blocks re-enqueue after PreBind was attempted.
+func (pl *PreEnqueueGateAfterPreBindPlugin) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Status {
+	if pl.preBind != nil && pl.preBind.hasTriedPreBind(p.UID) {
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "test gate: block re-enqueue after PreBind was attempted")
+	}
+	return nil
 }
 
 // TestPreFilterPlugin tests invocation of prefilter plugins.
@@ -1590,7 +1619,8 @@ func TestUnReservePreBindPlugins(t *testing.T) {
 				name:        "reservePlugin",
 				failReserve: false,
 			}
-			registry, profile := initRegistryAndConfig(t, []fwk.Plugin{test.plugin, reservePlugin}...)
+			requeueGate := &PreEnqueueGateAfterPreBindPlugin{preBind: test.plugin}
+			registry, profile := initRegistryAndConfig(t, []fwk.Plugin{requeueGate, test.plugin, reservePlugin}...)
 
 			testCtx, teardown := schedulerutils.InitTestSchedulerForFrameworkTest(t, testContext, 2, true,
 				scheduler.WithProfiles(profile),
@@ -2625,7 +2655,7 @@ var _ fwk.PostBindPlugin = &PostBindPlugin{}
 
 type JobPlugin struct {
 	podLister     listersv1.PodLister
-	podsActivated bool
+	podsActivated chan struct{}
 }
 
 func (j *JobPlugin) Name() string {
@@ -2666,7 +2696,7 @@ func (j *JobPlugin) PostBind(_ context.Context, state fwk.CycleState, p *v1.Pod,
 					s.Map[namespacedName] = pod
 				}
 				s.Unlock()
-				j.podsActivated = true
+				j.podsActivated <- struct{}{}
 			}
 		}
 	}
@@ -2680,7 +2710,10 @@ func TestActivatePods(t *testing.T) {
 	var jobPlugin *JobPlugin
 	// Create a plugin registry for testing. Register a Job plugin.
 	registry := frameworkruntime.Registry{jobPluginName: func(_ context.Context, _ runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
-		jobPlugin = &JobPlugin{podLister: fh.SharedInformerFactory().Core().V1().Pods().Lister()}
+		jobPlugin = &JobPlugin{
+			podLister:     fh.SharedInformerFactory().Core().V1().Pods().Lister(),
+			podsActivated: make(chan struct{}, 10),
+		}
 		return jobPlugin, nil
 	}}
 
@@ -2745,8 +2778,10 @@ func TestActivatePods(t *testing.T) {
 	}
 
 	// Lastly verify the pods activation logic is really called.
-	if jobPlugin.podsActivated == false {
-		t.Errorf("JobPlugin's pods activation logic is not called")
+	select {
+	case <-jobPlugin.podsActivated:
+	case <-time.After(wait.ForeverTestTimeout):
+		t.Errorf("JobPlugin's pods activation logic wasn't called")
 	}
 }
 

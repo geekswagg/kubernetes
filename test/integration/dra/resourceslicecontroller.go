@@ -42,18 +42,19 @@ func TestCreateResourceSlices(tCtx ktesting.TContext, numSlices int) {
 	domain := strings.Repeat("x", resourceapi.DeviceMaxDomainLength-len(domainSuffix)) + domainSuffix
 	stringValue := strings.Repeat("v", resourceapi.DeviceAttributeMaxValueLength)
 	pool := resourceslice.Pool{
-		Slices: make([]resourceslice.Slice, numSlices),
+		Slices:   make([]resourceslice.Slice, numSlices),
+		AllNodes: true,
 	}
 	numDevices := 0
-	for i := 0; i < numSlices; i++ {
+	for i := range numSlices {
 		devices := make([]resourceapi.Device, resourceapi.ResourceSliceMaxDevices)
-		for e := 0; e < resourceapi.ResourceSliceMaxDevices; e++ {
+		for e := range resourceapi.ResourceSliceMaxDevices {
 			device := resourceapi.Device{
 				Name:       devicePrefix + strings.Repeat("x", validation.DNS1035LabelMaxLength-len(devicePrefix)-6) + fmt.Sprintf("%06d", numDevices),
 				Attributes: make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, resourceapi.ResourceSliceMaxAttributesAndCapacitiesPerDevice),
 			}
 			numDevices++
-			for j := 0; j < resourceapi.ResourceSliceMaxAttributesAndCapacitiesPerDevice; j++ {
+			for j := range resourceapi.ResourceSliceMaxAttributesAndCapacitiesPerDevice {
 				name := resourceapi.QualifiedName(domain + "/" + strings.Repeat("x", resourceapi.DeviceMaxIDLength-4) + fmt.Sprintf("%04d", j))
 				device.Attributes[name] = resourceapi.DeviceAttribute{
 					StringValue: &stringValue,
@@ -87,7 +88,7 @@ func TestCreateResourceSlices(tCtx ktesting.TContext, numSlices int) {
 	tCtx.ExpectNoError(err, "start controller")
 	tCtx.CleanupCtx(func(tCtx ktesting.TContext) {
 		controller.Stop()
-		ktesting.Eventually(tCtx, func(tCtx ktesting.TContext) *resourceapi.ResourceSliceList {
+		tCtx.Eventually(func(tCtx ktesting.TContext) *resourceapi.ResourceSliceList {
 			err := tCtx.Client().ResourceV1().ResourceSlices().DeleteCollection(tCtx, metav1.DeleteOptions{}, metav1.ListOptions{
 				FieldSelector: resourceapi.ResourceSliceSelectorDriver + "=" + driverName,
 			})
@@ -97,7 +98,7 @@ func TestCreateResourceSlices(tCtx ktesting.TContext, numSlices int) {
 	})
 
 	// Eventually we should have all desired slices.
-	ktesting.Eventually(tCtx, listSlices).WithTimeout(3 * time.Minute).Should(gomega.HaveField("Items", gomega.HaveLen(numSlices)))
+	tCtx.Eventually(listSlices).WithTimeout(3 * time.Minute).Should(gomega.HaveField("Items", gomega.HaveLen(numSlices)))
 
 	// Verify state.
 	expectSlices := listSlices(tCtx)
@@ -110,25 +111,25 @@ func TestCreateResourceSlices(tCtx ktesting.TContext, numSlices int) {
 
 	// No further changes expected now, after checking again.
 	getStats := func(tCtx ktesting.TContext) resourceslice.Stats { return controller.GetStats() }
-	ktesting.Consistently(tCtx, getStats).WithTimeout(2 * mutationCacheTTL).Should(gomega.Equal(expectStats))
+	tCtx.Consistently(getStats).WithTimeout(2 * mutationCacheTTL).Should(gomega.Equal(expectStats))
 
 	// Ask the controller to delete all slices except for one empty slice.
 	tCtx.Log("Deleting slices")
 	resources = resources.DeepCopy()
-	resources.Pools[poolName] = resourceslice.Pool{Slices: []resourceslice.Slice{{}}}
+	resources.Pools[poolName] = resourceslice.Pool{Slices: []resourceslice.Slice{{}}, AllNodes: true}
 	controller.Update(resources)
 
-	// One empty slice should remain, after removing the full ones and adding the empty one.
+	// A slice should be updated to be empty, and the rest should be deleted.
 	emptySlice := gomega.HaveField("Spec.Devices", gomega.BeEmpty())
-	ktesting.Eventually(tCtx, listSlices).WithTimeout(2 * time.Minute).Should(gomega.HaveField("Items", gomega.HaveExactElements(emptySlice)))
-	expectStats = resourceslice.Stats{NumCreates: int64(numSlices) + 1, NumDeletes: int64(numSlices)}
+	tCtx.Eventually(listSlices).WithTimeout(2 * time.Minute).Should(gomega.HaveField("Items", gomega.HaveExactElements(emptySlice)))
+	expectStats = resourceslice.Stats{NumCreates: int64(numSlices), NumUpdates: 1, NumDeletes: int64(numSlices) - 1}
 
 	// There is a window of time where the ResourceSlice exists and is
 	// returned in a list but before that ResourceSlice is accounted for
 	// in the controller's stats, consisting mostly of network latency
 	// between this test process and the API server. Wait for the stats
 	// to converge before asserting there are no further changes.
-	ktesting.Eventually(tCtx, getStats).WithTimeout(30 * time.Second).Should(gomega.Equal(expectStats))
+	tCtx.Eventually(getStats).WithTimeout(30 * time.Second).Should(gomega.Equal(expectStats))
 
-	ktesting.Consistently(tCtx, getStats).WithTimeout(2 * mutationCacheTTL).Should(gomega.Equal(expectStats))
+	tCtx.Consistently(getStats).WithTimeout(2 * mutationCacheTTL).Should(gomega.Equal(expectStats))
 }

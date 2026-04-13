@@ -23,15 +23,20 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/dynamic-resource-allocation/resourceslice"
 	drautils "k8s.io/kubernetes/test/e2e/dra/utils"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
+func coreDRAResources(nodes *drautils.Nodes) map[string]resourceslice.DriverResources {
+	return drautils.DriverResourcesNow(nodes, 8)
+}
+
 func coreDRA(tCtx ktesting.TContext, b *drautils.Builder) upgradedTestFunc {
 	namespace := tCtx.Namespace()
 	claim := b.ExternalClaim()
-	pod := b.PodExternal()
+	pod := b.PodExternal(claim.Name)
 	b.Create(tCtx, claim, pod)
 	b.TestPod(tCtx, pod)
 
@@ -43,7 +48,7 @@ func coreDRA(tCtx ktesting.TContext, b *drautils.Builder) upgradedTestFunc {
 
 		// Create another claim and pod, this time using the latest Kubernetes.
 		claim = b.ExternalClaim()
-		pod = b.PodExternal()
+		pod = b.PodExternal(claim.Name)
 		pod.Spec.ResourceClaims[0].ResourceClaimName = &claim.Name
 		b.Create(tCtx, claim, pod)
 		b.TestPod(tCtx, pod)
@@ -56,13 +61,13 @@ func coreDRA(tCtx ktesting.TContext, b *drautils.Builder) upgradedTestFunc {
 			// to the restarted apiserver. Sometimes, attempts fail with "EOF" as error
 			// or (even weirder) with
 			//     getting *v1.Pod: pods "tester-2" is forbidden: User "kubernetes-admin" cannot get resource "pods" in API group "" in the namespace "dra-9021"
-			ktesting.Eventually(tCtx, func(tCtx ktesting.TContext) error {
+			tCtx.Eventually(func(tCtx ktesting.TContext) error {
 				return tCtx.Client().ResourceV1beta1().ResourceClaims(namespace).Delete(tCtx, claim.Name, metav1.DeleteOptions{})
 			}).Should(gomega.Succeed(), "delete claim after downgrade")
-			ktesting.Eventually(tCtx, func(tCtx ktesting.TContext) error {
+			tCtx.Eventually(func(tCtx ktesting.TContext) error {
 				return tCtx.Client().CoreV1().Pods(namespace).Delete(tCtx, pod.Name, metav1.DeleteOptions{})
 			}).Should(gomega.Succeed(), "delete pod after downgrade")
-			ktesting.Eventually(tCtx, func(tCtx ktesting.TContext) *v1.Pod {
+			tCtx.Eventually(func(tCtx ktesting.TContext) *v1.Pod {
 				pod, err := tCtx.Client().CoreV1().Pods(namespace).Get(tCtx, pod.Name, metav1.GetOptions{})
 				if apierrors.IsNotFound(err) {
 					return nil

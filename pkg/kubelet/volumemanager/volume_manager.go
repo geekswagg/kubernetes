@@ -207,7 +207,7 @@ func NewVolumeManager(
 	}
 
 	intreeToCSITranslator := csitrans.New()
-	csiMigratedPluginManager := csimigration.NewPluginManager(intreeToCSITranslator, utilfeature.DefaultFeatureGate)
+	csiMigratedPluginManager := csimigration.NewPluginManager(intreeToCSITranslator)
 
 	vm.intreeToCSITranslator = intreeToCSITranslator
 	vm.csiMigratedPluginManager = csiMigratedPluginManager
@@ -297,7 +297,7 @@ func (e *VolumeAttachLimitExceededError) Error() string {
 
 func (vm *volumeManager) Run(ctx context.Context, sourcesReady config.SourcesReady) {
 	logger := klog.FromContext(ctx)
-	defer runtime.HandleCrash()
+	defer runtime.HandleCrashWithContext(ctx)
 
 	if vm.kubeClient != nil {
 		// start informer for CSIDriver
@@ -516,7 +516,6 @@ func (vm *volumeManager) WaitForAllPodsUnmount(ctx context.Context, pods []*v1.P
 
 	funcs := make([]func() error, 0, len(pods))
 	for _, pod := range pods {
-		pod := pod
 		funcs = append(funcs, func() error {
 			return vm.WaitForUnmount(ctx, pod)
 		})

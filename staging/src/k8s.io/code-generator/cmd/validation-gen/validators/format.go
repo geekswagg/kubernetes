@@ -123,8 +123,8 @@ func getFormatValidationFunction(format string) (FunctionGen, error) {
 func (ftv formatTagValidator) Docs() TagDoc {
 	return TagDoc{
 		Tag:            ftv.TagName(),
-		StabilityLevel: Stable,
-		Scopes:         ftv.ValidScopes().UnsortedList(),
+		StabilityLevel: TagStabilityLevelStable,
+		Scopes:         sets.List(ftv.ValidScopes()),
 		Description:    "Indicates that a string field has a particular format.",
 		Payloads: []TagPayloadDoc{{ // Keep this list alphabetized.
 			Description: "k8s-extended-resource-name",

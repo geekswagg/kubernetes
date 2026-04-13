@@ -460,6 +460,18 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, isEmulat
 			ExpectedEtcdPath:  "/registry/validatingadmissionpolicybindings/pb1",
 			IntroducedVersion: "1.30",
 		},
+		gvr("admissionregistration.k8s.io", "v1", "mutatingadmissionpolicies"): {
+			Stub:              `{"metadata":{"name":"map1v1"},"spec":{"paramKind":{"apiVersion":"test.example.com/v1","kind":"Example"},"matchConstraints":{"resourceRules": [{"resourceNames": ["fakeName"], "apiGroups":["apps"],"apiVersions":["v1"],"operations":["CREATE", "UPDATE"], "resources":["deployments"]}]},"reinvocationPolicy": "IfNeeded","mutations":[{"applyConfiguration": {"expression":"Object{metadata: Object.metadata{labels: {'example':'true'}}}"}, "patchType":"ApplyConfiguration"}]}}`,
+			ExpectedEtcdPath:  "/registry/mutatingadmissionpolicies/map1v1",
+			ExpectedGVK:       gvkP("admissionregistration.k8s.io", "v1beta1", "MutatingAdmissionPolicy"),
+			IntroducedVersion: "1.36",
+		},
+		gvr("admissionregistration.k8s.io", "v1", "mutatingadmissionpolicybindings"): {
+			Stub:              `{"metadata":{"name":"mpb1v1"},"spec":{"policyName":"replicalimit-policy.example.com","paramRef":{"name":"replica-limit-test.example.com", "parameterNotFoundAction": "Allow"}}}`,
+			ExpectedEtcdPath:  "/registry/mutatingadmissionpolicybindings/mpb1v1",
+			ExpectedGVK:       gvkP("admissionregistration.k8s.io", "v1beta1", "MutatingAdmissionPolicyBinding"),
+			IntroducedVersion: "1.36",
+		},
 		// --
 
 		// k8s.io/kubernetes/pkg/apis/admissionregistration/v1beta1
@@ -516,12 +528,18 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, isEmulat
 		},
 		// --
 
-		// k8s.io/kubernetes/pkg/apis/scheduling/v1alpha1
-		gvr("scheduling.k8s.io", "v1alpha1", "workloads"): {
-			Stub:              `{"metadata": {"name": "w1"}, "spec": {"podGroups": [{"name": "group1", "policy": {"basic": {}}}]}}`,
+		// k8s.io/kubernetes/pkg/apis/scheduling/v1alpha2
+		gvr("scheduling.k8s.io", "v1alpha2", "workloads"): {
+			Stub:              `{"metadata": {"name": "w1"}, "spec": {"podGroupTemplates": [{"name": "group1", "schedulingPolicy": {"basic": {}}}]}}`,
 			ExpectedEtcdPath:  "/registry/workloads/" + namespace + "/w1",
-			IntroducedVersion: "1.35",
-			RemovedVersion:    "1.41",
+			IntroducedVersion: "1.36",
+			RemovedVersion:    "1.42",
+		},
+		gvr("scheduling.k8s.io", "v1alpha2", "podgroups"): {
+			Stub:              `{"metadata": {"name": "pg1"}, "spec": {"schedulingPolicy": {"basic": {}}}}`,
+			ExpectedEtcdPath:  "/registry/podgroups/" + namespace + "/pg1",
+			IntroducedVersion: "1.36",
+			RemovedVersion:    "1.42",
 		},
 		// --
 
@@ -587,6 +605,12 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, isEmulat
 			IntroducedVersion: "1.33",
 			RemovedVersion:    "1.39",
 		},
+		gvr("resource.k8s.io", "v1alpha3", "resourcepoolstatusrequests"): {
+			Stub:              `{"metadata": {"name": "rpsr1name"}, "spec": {"driver": "test-driver.example.com"}}`,
+			ExpectedEtcdPath:  "/registry/resourcepoolstatusrequests/rpsr1name",
+			IntroducedVersion: "1.36",
+			RemovedVersion:    "1.42",
+		},
 		// --
 
 		// k8s.io/kubernetes/pkg/apis/resource/v1beta1
@@ -630,6 +654,13 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, isEmulat
 			ExpectedGVK:       gvkP("resource.k8s.io", "v1", "DeviceClass"),
 			IntroducedVersion: "1.33",
 			RemovedVersion:    "1.39",
+		},
+		gvr("resource.k8s.io", "v1beta2", "devicetaintrules"): {
+			Stub:              `{"metadata": {"name": "taint2name"}, "spec": {"taint": {"key": "example.com/taintkey", "value": "taintvalue", "effect": "NoSchedule"}}}`,
+			ExpectedEtcdPath:  "/registry/devicetaintrules/taint2name",
+			ExpectedGVK:       gvkP("resource.k8s.io", "v1alpha3", "DeviceTaintRule"), // v1beta2 has higher priority, but to support downgrades v1alpha3 is picked automatically.
+			IntroducedVersion: "1.36",
+			RemovedVersion:    "1.42",
 		},
 		gvr("resource.k8s.io", "v1beta2", "resourceclaims"): {
 			Stub:              `{"metadata": {"name": "claim3name"}, "spec": {"devices": {"requests": [{"name": "req-0", "exactly": {"deviceClassName": "example-class", "allocationMode": "ExactCount", "count": 1}}]}}}`,
