@@ -148,16 +148,24 @@ func (r *Reconciler) Reconcile(logger klog.Logger, service *corev1.Service, pods
 	// delete those which are of addressType that is no longer supported
 	// by the service
 	for _, sliceToDelete := range slicesToDelete {
-		err := r.client.DiscoveryV1().EndpointSlices(service.Namespace).Delete(context.TODO(), sliceToDelete.Name, metav1.DeleteOptions{})
-		if err != nil {
+		if err := r.deleteEndpointSlice(service, sliceToDelete); err != nil {
 			errs = append(errs, fmt.Errorf("error deleting %s EndpointSlice for Service %s/%s: %w", sliceToDelete.Name, service.Namespace, service.Name, err))
-		} else {
-			r.endpointSliceTracker.ExpectDeletion(sliceToDelete)
-			metrics.EndpointSliceChanges.WithLabelValues("delete").Inc()
 		}
 	}
 
 	return utilerrors.NewAggregate(errs)
+}
+
+// deleteEndpointSlice tolerates slices that have already been deleted.
+func (r *Reconciler) deleteEndpointSlice(service *corev1.Service, endpointSlice *discovery.EndpointSlice) error {
+	err := r.client.DiscoveryV1().EndpointSlices(service.Namespace).Delete(context.TODO(), endpointSlice.Name, metav1.DeleteOptions{})
+	if err != nil {
+		return utilerrors.FilterOut(err, errors.IsNotFound)
+	}
+
+	r.endpointSliceTracker.ExpectDeletion(endpointSlice)
+	metrics.EndpointSliceChanges.WithLabelValues("delete").Inc()
+	return nil
 }
 
 // reconcileByAddressType takes a set of pods currently matching a service selector and
@@ -377,12 +385,17 @@ func NewReconciler(client clientset.Interface, nodeLister corelisters.NodeLister
 // placeholderSliceCompare is a conversion func for comparing two placeholder endpoint slices.
 // It only compares the specific fields we care about.
 var placeholderSliceCompare = conversion.EqualitiesOrDie(
-	func(a, b metav1.OwnerReference) bool {
-		return a.String() == b.String()
-	},
 	func(a, b metav1.ObjectMeta) bool {
 		if a.Namespace != b.Namespace {
 			return false
+		}
+		if len(a.OwnerReferences) != len(b.OwnerReferences) {
+			return false
+		}
+		for i := range a.OwnerReferences {
+			if a.OwnerReferences[i].UID != b.OwnerReferences[i].UID {
+				return false
+			}
 		}
 		for k, v := range a.Labels {
 			if b.Labels[k] != v {
@@ -462,12 +475,9 @@ func (r *Reconciler) finalize(
 	}
 
 	for _, endpointSlice := range slicesToDelete {
-		err := r.client.DiscoveryV1().EndpointSlices(service.Namespace).Delete(context.TODO(), endpointSlice.Name, metav1.DeleteOptions{})
-		if err != nil {
+		if err := r.deleteEndpointSlice(service, endpointSlice); err != nil {
 			return fmt.Errorf("failed to delete %s EndpointSlice for Service %s/%s: %v", endpointSlice.Name, service.Namespace, service.Name, err)
 		}
-		r.endpointSliceTracker.ExpectDeletion(endpointSlice)
-		metrics.EndpointSliceChanges.WithLabelValues("delete").Inc()
 	}
 
 	topologyLabel := "Disabled"

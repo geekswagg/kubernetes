@@ -21,6 +21,8 @@ import (
 	"path"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/code-generator/cmd/validation-gen/util"
 	"k8s.io/code-generator/cmd/validation-gen/validators"
 	"k8s.io/gengo/v2/codetags"
 	"k8s.io/gengo/v2/types"
@@ -156,20 +158,20 @@ func hasRequirednessTag(tags []codetags.Tag) bool {
 	return hasTag(tags, "k8s:optional") || hasTag(tags, "k8s:required") || hasTag(tags, "k8s:forbidden")
 }
 
-// hasAnyValidationTag returns true if tags contain any registered validation tag.
-func hasAnyValidationTag(tags []codetags.Tag) bool {
+// hasNonOpaqueValidationTag returns true if tags contain any registered validation tag that is not opaqueType.
+func hasNonOpaqueValidationTag(extractor validators.ValidationExtractor, chainTags sets.Set[string], tags []codetags.Tag) bool {
 	for _, tag := range tags {
-		switch tag.Name {
-		case "k8s:optional":
+		if tag.Name == "k8s:optional" || tag.Name == "k8s:opaqueType" {
 			continue
-		case "k8s:alpha", "k8s:beta":
-			if tag.ValueTag != nil && hasAnyValidationTag([]codetags.Tag{*tag.ValueTag}) {
+		}
+		if chainTags.Has(tag.Name) {
+			if tag.ValueTag != nil && hasNonOpaqueValidationTag(extractor, chainTags, []codetags.Tag{*tag.ValueTag}) {
 				return true
 			}
 			continue
 		}
 		// Check if it's a known validation tag.
-		if _, err := validators.GetStability(tag.Name); err == nil {
+		if extractor.IsKnownTag(tag.Name) {
 			return true
 		}
 	}
@@ -179,70 +181,142 @@ func hasAnyValidationTag(tags []codetags.Tag) bool {
 // requiredAndOptional checks that fields (pointers, slices, maps, arrays) with validation
 // (either direct or transitive) explicitly declare +k8s:optional or +k8s:required.
 func requiredAndOptional(extractor validators.ValidationExtractor) lintRule {
-	// Cache for transitive validation check.
-	// Tri-state: key absent = unvisited, value nil = in-progress (cycle), value *bool = computed result.
-	hasValidation := make(map[*types.Type]*bool)
-
-	// checkType recursively checks if a type has any validation (transitively).
-	var checkType func(t *types.Type) (bool, bool)
-	checkType = func(t *types.Type) (bool, bool) {
-		if val, ok := hasValidation[t]; ok {
-			if val == nil {
-				return false, true // Cycle detected, break conservatively
-			}
-			return *val, false
+	chainTags := sets.New[string]()
+	for _, doc := range extractor.Docs() {
+		if doc.PayloadsType == codetags.ValueTypeTag {
+			chainTags.Insert(doc.Tag)
 		}
-		// Mark in-progress
-		hasValidation[t] = nil
-		extractedTags, err := extractor.ExtractTags(validators.Context{}, t.CommentLines)
-		hasVal := err == nil && hasAnyValidationTag(extractedTags)
-		cycleBroken := false
+	}
 
+	type opacity struct {
+		typ, key, val bool
+	}
+
+	filterTags := func(tags []codetags.Tag) []codetags.Tag {
+		var filtered []codetags.Tag
+		for _, tag := range tags {
+			if extractor.IsKnownTag(tag.Name) {
+				filtered = append(filtered, tag)
+			}
+		}
+		return filtered
+	}
+
+	type cacheKey struct {
+		t  *types.Type
+		op opacity
+	}
+	hasValidation := make(map[cacheKey]*bool)
+
+	// returns hasValidation, hasCycle, error
+	var hasTransitiveValidation func(t *types.Type, op opacity) (bool, bool, error)
+	hasTransitiveValidation = func(t *types.Type, op opacity) (bool, bool, error) {
+		if op.typ {
+			return false, false, nil
+		}
+
+		ck := cacheKey{t, op}
+		visitedVal, visited := hasValidation[ck]
+		if visited {
+			if visitedVal == nil {
+				return false, true, nil // cycle detected
+			}
+			return *visitedVal, false, nil
+		}
+		hasValidation[ck] = nil
+
+		tTags, err := extractor.ExtractTags(validators.Context{Scope: validators.ScopeType, Type: t}, t.CommentLines)
+		if err != nil {
+			return false, false, err
+		}
+
+		typeVals, err := extractor.ExtractValidations(
+			validators.Context{Scope: validators.ScopeType, Type: t},
+			filterTags(tTags)...,
+		)
+		if err != nil {
+			return false, false, err
+		}
+
+		op.typ = op.typ || typeVals.OpaqueType
+		op.key = op.key || typeVals.OpaqueKeyType
+		op.val = op.val || typeVals.OpaqueValType
+
+		if op.typ {
+			hasVal := false
+			hasValidation[ck] = &hasVal
+			return false, false, nil
+		}
+
+		if typeVals.HasEmitable() {
+			hasVal := true
+			hasValidation[ck] = &hasVal
+			return true, false, nil
+		}
+
+		var hasVal, cycleBroken bool
 		switch t.Kind {
 		case types.Alias:
-			if hv, cb := checkType(t.Underlying); hv {
-				hasVal = true
-			} else if cb {
-				cycleBroken = true
-			}
-		case types.Struct:
-			for _, member := range t.Members {
-				memberTags, err := extractor.ExtractTags(validators.Context{}, member.CommentLines)
-				memberHasVal := err == nil && hasAnyValidationTag(memberTags)
-				if hv, cb := checkType(member.Type); hv {
-					memberHasVal = true
-				} else if cb {
-					cycleBroken = true
-				}
-				if memberHasVal {
-					hasVal = true
-				}
-			}
-		case types.Slice, types.Array, types.Pointer:
-			if hv, cb := checkType(t.Elem); hv {
-				hasVal = true
-			} else if cb {
-				cycleBroken = true
-			}
+			hasVal, cycleBroken, err = hasTransitiveValidation(t.Underlying, op)
+		case types.Slice, types.Array:
+			hasVal, cycleBroken, err = hasTransitiveValidation(t.Elem, opacity{typ: op.val})
 		case types.Map:
-			if hv, cb := checkType(t.Key); hv {
-				hasVal = true
-			} else if cb {
-				cycleBroken = true
+			kVal, cbKey, err := hasTransitiveValidation(t.Key, opacity{typ: op.key})
+			if err != nil {
+				return false, false, err
 			}
-			if hv, cb := checkType(t.Elem); hv {
-				hasVal = true
-			} else if cb {
-				cycleBroken = true
+			eVal, cbVal, err := hasTransitiveValidation(t.Elem, opacity{typ: op.val})
+			if err != nil {
+				return false, false, err
+			}
+			hasVal = kVal || eVal
+			cycleBroken = cbKey || cbVal
+		case types.Pointer:
+			hasVal, cycleBroken, err = hasTransitiveValidation(t.Elem, op)
+		case types.Struct:
+			for _, m := range t.Members {
+				mTags, err := extractor.ExtractTags(validators.Context{Scope: validators.ScopeField, Type: m.Type}, m.CommentLines)
+				if err != nil {
+					return false, false, err
+				}
+				if hasNonOpaqueValidationTag(extractor, chainTags, mTags) {
+					hasVal = true
+					break
+				}
+				fieldVals, err := extractor.ExtractValidations(
+					validators.Context{Scope: validators.ScopeField, Type: m.Type},
+					filterTags(mTags)...,
+				)
+				if err != nil {
+					return false, false, err
+				}
+				mOp := opacity{
+					typ: op.typ || fieldVals.OpaqueType,
+					key: op.key || fieldVals.OpaqueKeyType,
+					val: op.val || fieldVals.OpaqueValType,
+				}
+				hv, cb, err := hasTransitiveValidation(m.Type, mOp)
+				if err != nil {
+					return false, false, err
+				}
+				cycleBroken = cycleBroken || cb
+				if hv {
+					hasVal = true
+					break
+				}
 			}
 		}
 
-		if hasVal || !cycleBroken {
-			hasValidation[t] = &hasVal
-		} else {
-			delete(hasValidation, t)
+		if err != nil {
+			return false, false, err
 		}
-		return hasVal, cycleBroken
+
+		if !cycleBroken {
+			hasValidation[ck] = &hasVal
+		} else {
+			delete(hasValidation, ck)
+		}
+		return hasVal, cycleBroken, nil
 	}
 
 	return func(container *types.Type, t *types.Type, tags []codetags.Tag) (string, error) {
@@ -251,7 +325,8 @@ func requiredAndOptional(extractor validators.ValidationExtractor) lintRule {
 			return "", nil
 		}
 
-		// Skip non-pointer structs (and aliases to them) as they don't support requiredness tags.
+		// Skip non-pointer structs (and aliases to them): their requiredness is
+		// handled by nonPointerStructRequiredness.
 		underlying := t
 		for underlying.Kind == types.Alias {
 			underlying = underlying.Underlying
@@ -265,14 +340,107 @@ func requiredAndOptional(extractor validators.ValidationExtractor) lintRule {
 			return "", nil
 		}
 
-		// Check if it has validation (direct or transitive)
-		hasDirectVal := hasAnyValidationTag(tags)
-		hasTransitiveVal, _ := checkType(t)
-
-		if hasDirectVal || hasTransitiveVal {
+		// Check if it has validation (direct or active transitive)
+		if hasNonOpaqueValidationTag(extractor, chainTags, tags) {
 			return "field with validation must have +k8s:optional, +k8s:required or +k8s:forbidden", nil
 		}
 
+		fieldVals, err := extractor.ExtractValidations(
+			validators.Context{Scope: validators.ScopeField, Type: t},
+			filterTags(tags)...,
+		)
+		if err != nil {
+			return fmt.Sprintf("invalid validation tags: %v", err), nil
+		}
+
+		topOp := opacity{
+			typ: fieldVals.OpaqueType,
+			key: fieldVals.OpaqueKeyType,
+			val: fieldVals.OpaqueValType,
+		}
+
+		hasTransitiveVal, _, err := hasTransitiveValidation(t, topOp)
+		if err != nil {
+			return fmt.Sprintf("invalid validation tags: %v", err), nil
+		}
+
+		if hasTransitiveVal {
+			return "field with validation must have +k8s:optional, +k8s:required or +k8s:forbidden", nil
+		}
+
+		return "", nil
+	}
+}
+
+// isImplicitlyRequired returns true if a struct has a member tagged
+// +k8s:required or +k8s:unionMember, directly or in a struct it contains by
+// value. Such a struct rejects its own zero value, which makes a non-pointer
+// field of that type required in effect.
+func isImplicitlyRequired(extractor validators.ValidationExtractor, t *types.Type) (bool, error) {
+	st := util.NativeType(t)
+	if st.Kind != types.Struct {
+		return false, nil
+	}
+	for _, m := range st.Members {
+		mTags, err := extractor.ExtractTags(validators.Context{Scope: validators.ScopeField, Type: m.Type}, m.CommentLines)
+		if err != nil {
+			return false, err
+		}
+		if hasTag(mTags, "k8s:required") || hasTag(mTags, "k8s:unionMember") {
+			return true, nil
+		}
+		// An opaque member's own validations are ignored.
+		if hasTag(mTags, "k8s:opaqueType") {
+			continue
+		}
+		// Only descend by value: an unset pointer, slice or map member is nil,
+		// so nothing inside it is validated. Go forbids value cycles, so this
+		// terminates without cycle detection.
+		if nested, err := isImplicitlyRequired(extractor, m.Type); err != nil || nested {
+			return nested, err
+		}
+	}
+	return false, nil
+}
+
+// nonPointerStructRequiredness enforces that +k8s:required and +k8s:optional on
+// a non-pointer struct field match the struct's implicit requiredness. Neither
+// tag emits a presence check there (an unset struct is indistinguishable from a
+// zero-valued one), so the field is required exactly when the struct is.
+func nonPointerStructRequiredness(extractor validators.ValidationExtractor) lintRule {
+	return func(container *types.Type, t *types.Type, tags []codetags.Tag) (string, error) {
+		// We only care about fields in a struct. Skip if linting the struct itself.
+		if container == nil || container.Kind != types.Struct || container == t {
+			return "", nil
+		}
+		if util.NativeType(t).Kind != types.Struct {
+			return "", nil
+		}
+
+		isRequired, isOptional := hasTag(tags, "k8s:required"), hasTag(tags, "k8s:optional")
+		if !isRequired && !isOptional {
+			return "", nil
+		}
+
+		// An opaque type's validations are ignored, so nothing inside it can
+		// make the field required.
+		if hasTag(tags, "k8s:opaqueType") {
+			if isRequired {
+				return fmt.Sprintf("+k8s:required on non-pointer opaque struct %s: its validations are ignored, so the field is effectively optional", t.Name), nil
+			}
+			return "", nil
+		}
+
+		implied, err := isImplicitlyRequired(extractor, t)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case isRequired && !implied:
+			return fmt.Sprintf("+k8s:required on non-pointer struct %s: it has no required or union member, so the field is effectively optional", t.Name), nil
+		case isOptional && implied:
+			return fmt.Sprintf("+k8s:optional on non-pointer struct %s: it has a required or union member, so the field is effectively required", t.Name), nil
+		}
 		return "", nil
 	}
 }
@@ -282,5 +450,6 @@ func lintRules(extractor validators.ValidationExtractor) []lintRule {
 		alphaBetaPrefix(),
 		validationStability(),
 		requiredAndOptional(extractor),
+		nonPointerStructRequiredness(extractor),
 	}
 }
